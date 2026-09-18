@@ -1,0 +1,19 @@
+id = "alevsk.agent-usage"
+name = "Agent Usage Dashboard"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Displays a dashboard of current agent usage/capacity"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "show"
+title = "Show Usage Dashboard"
+command = ["herdr", "plugin", "pane", "open", "--plugin", "alevsk.agent-usage", "--entrypoint", "dashboard"]
+
+[[panes]]
+id = "dashboard"
+title = "Agent Usage Dashboard"
+placement = "overlay"
+command = ["bash", "usage.sh"]
+
+
