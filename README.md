@@ -8,18 +8,19 @@ A highly optimized TUI dashboard providing real-time observability into your act
 - **API Subscription Quotas:** Automatically detects native CLI integrations (like `claude` and `agy` Antigravity) and pulls their billing limits.
 - **Smart Progress Bars:** An inline `awk` engine parses raw percentages (e.g. `82%`) and dynamically injects colorized block progress bars (e.g., `[████████░░] 82%`) into the UI without breaking layout alignments.
 - **0ms Blocking (Background Caching):** Because pulling API billing data from Claude/Gemini takes several seconds, the dashboard uses asynchronous detached background jobs (`& disown`) and a `/tmp/` cache. The dashboard pops up instantly using 5-minute stale cache windows, guaranteeing a fast UX while saving LLM tokens/API rate limits.
+- **Offline Agent Detection:** Seamlessly merges active Herdr socket limits with fallback scans of installed configuration directories (`~/.codex`, `~/.grok`, etc.) so you have a complete picture of your machine's AI capabilities even when panes are closed.
 
 ## Requirements
 - `herdr` CLI
 - `jq` (JSON parsing)
-- `awk` & `column` (for UI layout processing)
+- `awk` (for UI layout processing)
 - Supported Agent CLIs (`claude`, `agy`) for extended quota capabilities.
 
-## Manual Installation
+## Installation
 
-1. Link the plugin to Herdr:
+1. Install the plugin directly from GitHub:
    ```bash
-   herdr plugin link /path/to/herdr-agent-usage
+   herdr plugin install <username>/herdr-agent-usage
    ```
 
 2. Add the keybinding to your `~/.config/herdr/config.toml`:
