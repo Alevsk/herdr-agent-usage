@@ -20,7 +20,7 @@ A highly optimized TUI dashboard providing real-time observability into your act
 
 1. Install the plugin directly from GitHub:
    ```bash
-   herdr plugin install <username>/herdr-agent-usage
+   herdr plugin install alevsk/herdr-agent-usage
    ```
 
 2. Add the keybinding to your `~/.config/herdr/config.toml`:
