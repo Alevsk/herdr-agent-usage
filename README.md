@@ -27,7 +27,9 @@ A highly optimized TUI dashboard providing real-time observability into your act
    ```toml
    [[keys.command]]
    key = "prefix+u"
-   command = "herdr plugin invoke herdr-agent-usage"
+   type = "plugin_action"
+   command = "alevsk.agent-usage.show"
+   description = "Agent Usage Dashboard"
    ```
 
 3. Reload the Herdr server:
