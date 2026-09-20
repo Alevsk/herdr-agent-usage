@@ -73,6 +73,8 @@ echo "$JSON_DATA" | jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.
     context_c=$([ "$context" != "-" ] && echo "$CYAN" || echo "$DIM")
     printf "${SUBMARGIN}${BOLD}${WHITE}%-12s${RESET} | ${status_c}%-9s${RESET} | ${WHITE}%-32s${RESET} | ${context_c}%s${RESET}\n" "$agent" "$status" "$title" "$context" | format_bars
 done
+echo -e "${DIM}${SUBMARGIN}* Note: \"-\" means the agent is idle, new, or its CLI lacks Herdr token hook support (e.g. agy).${RESET}"
+echo ""
 
 echo -e "\n${MARGIN}${YELLOW}■ SUBSCRIPTION LIMITS ${RESET}"
 
@@ -106,7 +108,15 @@ update_cache_if_stale "claude" "/tmp/claude_quota.txt"
 
 if [ -f /tmp/agy_quota.txt ]; then
     echo -e "${SUBMARGIN}${CYAN}[Antigravity Quota]${RESET}"
-    grep -v "Quota:" /tmp/agy_quota.txt | awk -F'\t' '{ printf "%-22s | %-25s | %-5s | %s\n", $1, $2, $3, $4 }' | sed "s/^/$SUBSUBMARGIN/" | format_bars
+    grep -v "Quota:" /tmp/agy_quota.txt | while IFS=$'	' read -r model limit pct reset; do
+        if date --version >/dev/null 2>&1; then
+            reset_local=$(date -d "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
+        else
+            reset_local=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
+        fi
+        reset_local=${reset_local:-$reset}
+        printf "%-22s | %-25s | %-5s | %s\n" "$model" "$limit" "$pct" "$reset_local"
+    done | sed "s/^/$SUBSUBMARGIN/" | format_bars
     echo ""
 fi
 
