@@ -43,7 +43,7 @@ format_bars() {
 }
 
 JSON_DATA=$("$HERDR" agent list 2>/dev/null)
-if [ -z "$JSON_DATA" ] || ! echo "$JSON_DATA" | jq -e '.result.agents' >/dev/null 2>&1; then
+if [ -z "$JSON_DATA" ] || ! jq -e '.result.agents' <<< "$JSON_DATA" >/dev/null 2>&1; then
     echo -e "${YELLOW}Error: Unable to fetch valid agent data from Herdr.${RESET}"
     exit 1
 fi
@@ -54,9 +54,13 @@ echo -e "${MARGIN}${CYAN}╭─────────────────�
 echo -e "${MARGIN}${CYAN}│                       ${BOLD}Herdr Agent Usage Dashboard${RESET}${CYAN}                           │${RESET}"
 echo -e "${MARGIN}${CYAN}╰─────────────────────────────────────────────────────────────────────────────╯${RESET}\n"
 
-TOTAL_AGENTS=$(echo "$JSON_DATA" | jq '(.result.agents // []) | length')
-WORKING_AGENTS=$(echo "$JSON_DATA" | jq '[(.result.agents // [])[] | select(.agent_status == "working")] | length')
-IDLE_AGENTS=$(echo "$JSON_DATA" | jq '[(.result.agents // [])[] | select(.agent_status == "idle")] | length')
+read -r TOTAL_AGENTS WORKING_AGENTS IDLE_AGENTS <<< $(jq -r '
+  (.result.agents // []) |
+  length as $total |
+  (map(select(.agent_status == "working")) | length) as $working |
+  (map(select(.agent_status == "idle")) | length) as $idle |
+  "\($total) \($working) \($idle)"
+' <<< "$JSON_DATA")
 
 echo -e "${MARGIN}${MAGENTA}■ SUMMARY ${RESET}"
 echo -e "${SUBMARGIN}Total Agents:  ${WHITE}$TOTAL_AGENTS${RESET}"
@@ -67,7 +71,7 @@ echo -e "${MARGIN}${BLUE}■ AGENT CONTEXT BREAKDOWN ${RESET}"
 printf "${DIM}${SUBMARGIN}%-12s | %-9s | %-32s | %s${RESET}\n" "AGENT" "STATUS" "TASK" "CONTEXT & TOKENS"
 echo -e "${DIM}${SUBMARGIN}────────────────────────────────────────────────────────────────────────────${RESET}"
 
-echo "$JSON_DATA" | jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task")] | @tsv' | while IFS=$'\t' read -r agent status context title; do
+jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task")] | @tsv' <<< "$JSON_DATA" | while IFS=$'\t' read -r agent status context title; do
     status_c=$([ "$status" = "working" ] && echo "$GREEN" || echo "$YELLOW")
     [ ${#title} -gt 31 ] && title="${title:0:28}..."
     context_c=$([ "$context" != "-" ] && echo "$CYAN" || echo "$DIM")
@@ -122,7 +126,7 @@ fi
 
 if [ -f /tmp/claude_quota.txt ]; then
     echo -e "${SUBMARGIN}${CYAN}[Claude Subscription]${RESET}"
-    grep -E "used" /tmp/claude_quota.txt | sed "s/^/$SUBSUBMARGIN/" | format_bars
+    awk -v prefix="$SUBSUBMARGIN" '/used/{print prefix $0}' /tmp/claude_quota.txt | format_bars
     echo ""
 fi
 
@@ -136,7 +140,7 @@ declare -A HERDR_PROVIDERS
 while IFS=$'\t' read -r agent provider limit; do
     HERDR_LIMITS["$agent"]="$limit"
     HERDR_PROVIDERS["$agent"]="$provider"
-done < <(echo "$JSON_DATA" | jq -r '(.result.agents // []) | map(select(.tokens != null and .tokens.limit != null)) | unique_by(.agent) | .[] | [ .agent, (.tokens.provider // "-"), .tokens.limit ] | @tsv')
+done < <(jq -r '(.result.agents // []) | map(select(.tokens != null and .tokens.limit != null)) | unique_by(.agent) | .[] | [ .agent, (.tokens.provider // "-"), .tokens.limit ] | @tsv' <<< "$JSON_DATA")
 
 # Standard integration install directories
 declare -A KNOWN_AGENTS=(
