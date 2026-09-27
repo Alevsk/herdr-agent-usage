@@ -71,13 +71,82 @@ echo -e "${MARGIN}${BLUE}■ AGENT CONTEXT BREAKDOWN ${RESET}"
 printf "${DIM}${SUBMARGIN}%-12s | %-9s | %-32s | %s${RESET}\n" "AGENT" "STATUS" "TASK" "CONTEXT & TOKENS"
 echo -e "${DIM}${SUBMARGIN}────────────────────────────────────────────────────────────────────────────${RESET}"
 
-jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task")] | @tsv' <<< "$JSON_DATA" | while IFS=$'\t' read -r agent status context title; do
+short_tokens() {
+    if [ "$1" -ge 1000 ]; then echo "$(( ($1 + 500) / 1000 ))k"; else echo "$1"; fi
+}
+
+# Live context of a pane, read from the session file its agent is writing, so it
+# is current even mid-turn and needs no hook. Prints nothing when unknown.
+# Claude: the transcript named by the session id Herdr tracks for the pane; the
+# context is every input token of the last main-thread request. The window size
+# is only given to the status line, so it comes from what hooks/claude-statusline.sh
+# saved for the session; without it there is no percentage.
+CLAUDE_STATUS_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-agent-usage/claude"
+
+claude_live_context() {
+    local session=$1 transcript tokens window=""
+    [ "$session" != "-" ] || return 1
+    for transcript in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$session".jsonl; do
+        [ -f "$transcript" ] && break
+    done
+    [ -f "$transcript" ] || return 1
+    tokens=$(grep -h '"type":"assistant"' "$transcript" | grep -v -e '"isSidechain":true' -e '"model":"<synthetic>"' |
+        tail -n 1 | jq -r '.message.usage | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null)
+    [[ "$tokens" =~ ^[0-9]+$ ]] && [ "$tokens" -gt 0 ] || return 1
+    [ -f "$CLAUDE_STATUS_CACHE/$session.json" ] &&
+        window=$(jq -r '.context_window.context_window_size // empty' "$CLAUDE_STATUS_CACHE/$session.json" 2>/dev/null)
+    if [[ "$window" =~ ^[0-9]+$ ]] && [ "$window" -gt 0 ]; then
+        echo "⛁ $(( (tokens * 100 + window / 2) / window ))% ($(short_tokens "$tokens"))"
+    else
+        echo "⛁ $(short_tokens "$tokens")"
+    fi
+}
+
+# Codex: Herdr has no session id for it, so use the newest rollout started in
+# the pane's working directory, against the model's context window.
+codex_live_context() {
+    local cwd=$1 sessions="${CODEX_HOME:-$HOME/.codex}/sessions" rollout used window
+    [ -d "$sessions" ] && [ "$cwd" != "-" ] || return 1
+    rollout=$(find "$sessions" -type f -name 'rollout-*.jsonl' -mtime -7 -print0 2>/dev/null |
+        while IFS= read -r -d '' file; do
+            head -n 1 "$file" | grep -qF "\"cwd\":\"$cwd\"" && printf '%s\0' "$file"
+        done | newest_file) || return 1
+    read -r used window < <(grep -h '"type":"token_count"' "$rollout" | grep '"info":{' | tail -n 1 |
+        jq -r '.payload.info | "\(.last_token_usage.total_tokens // "") \(.model_context_window // "")"' 2>/dev/null)
+    [[ "$used" =~ ^[0-9]+$ ]] || return 1
+    if [[ "$window" =~ ^[0-9]+$ ]] && [ "$window" -gt 0 ]; then
+        echo "⛁ $(( (used * 100 + window / 2) / window ))% ($(short_tokens "$used"))"
+    else
+        echo "⛁ $(short_tokens "$used")"
+    fi
+}
+
+# Prints the newest file among the NUL-separated paths read from stdin.
+newest_file() {
+    local newest="" file
+    while IFS= read -r -d '' file; do
+        [[ -z "$newest" || "$file" -nt "$newest" ]] && newest=$file
+    done
+    [ -n "$newest" ] && echo "$newest"
+}
+
+# Empty fields become "-": read collapses consecutive tabs.
+jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task"),
+    (.agent_session.value // "-"), (.foreground_cwd // .cwd // "-")] | map(if . == null or . == "" then "-" else . end) | @tsv' <<< "$JSON_DATA" |
+while IFS=$'\t' read -r agent status context title session cwd; do
+    # Prefer the live value; what Herdr holds is only as fresh as the last report.
+    live=""
+    case "$agent" in
+        claude) live=$(claude_live_context "$session") ;;
+        codex) live=$(codex_live_context "$cwd") ;;
+    esac
+    [ -n "$live" ] && context=$live
     status_c=$([ "$status" = "working" ] && echo "$GREEN" || echo "$YELLOW")
     [ ${#title} -gt 31 ] && title="${title:0:28}..."
     context_c=$([ "$context" != "-" ] && echo "$CYAN" || echo "$DIM")
     printf "${SUBMARGIN}${BOLD}${WHITE}%-12s${RESET} | ${status_c}%-9s${RESET} | ${WHITE}%-32s${RESET} | ${context_c}%s${RESET}\n" "$agent" "$status" "$title" "$context" | format_bars
 done
-echo -e "${DIM}${SUBMARGIN}* Note: \"-\" means the agent is idle, new, or its CLI lacks Herdr token hook support (e.g. agy).${RESET}"
+echo -e "${DIM}${SUBMARGIN}* Claude and Codex context is read live from their session files; Claude shows a percentage once hooks/claude-statusline.sh has run. \"-\" means no data yet.${RESET}"
 echo ""
 
 echo -e "\n${MARGIN}${YELLOW}■ SUBSCRIPTION LIMITS ${RESET}"
@@ -214,15 +283,6 @@ done < <(jq -r '(.result.agents // []) | map(select(.tokens != null and .tokens.
 
 # Fallback for agents Herdr has no limit for: read what the agent CLI already
 # writes to its local session files. No network calls, no credentials.
-
-# Prints the newest file among the NUL-separated paths read from stdin.
-newest_file() {
-    local newest="" file
-    while IFS= read -r -d '' file; do
-        [[ -z "$newest" || "$file" -nt "$newest" ]] && newest=$file
-    done
-    [ -n "$newest" ] && echo "$newest"
-}
 
 # Codex records its subscription limits in every token_count event of the
 # session rollouts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). Use the latest
