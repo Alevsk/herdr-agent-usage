@@ -42,3 +42,45 @@ A highly optimized TUI dashboard providing real-time observability into your act
 
 ## Usage
 Press `prefix+u` (or your configured keybinding) to pop open the dashboard over your current workspace. The dashboard operates as an ephemeral overlay and exits upon pressing any key.
+
+## Optional: Per-Pane Context Hooks
+The **Agent Context Breakdown** column shows the `context` token that each pane reports to Herdr. Herdr's built-in Claude Code and Codex integrations only report agent state, so without a reporter the column shows `-`. The dashboard works fine without these hooks; they only fill that column.
+
+The `hooks/` directory ships two optional Stop hooks that read the session file the agent already writes (no network calls, no credentials) and report `context` for their own pane. They exit silently outside Herdr.
+
+| Hook | Reports | Source |
+| --- | --- | --- |
+| `hooks/claude-context.sh` | Context tokens of the last main-thread request (e.g. `⛁ 321k`). No percentage: the context window size is not stored on disk. | `transcript_path` from the hook input |
+| `hooks/codex-context.sh` | Context usage against the model window (e.g. `⛁ 21% (54k)`). | `last_token_usage` and `model_context_window` in the session rollout |
+
+Requires `python3`.
+
+**Claude Code:** copy the script and add it to the `Stop` hooks in `~/.claude/settings.json`, next to any hooks already there:
+```bash
+cp hooks/claude-context.sh ~/.claude/hooks/agent-usage-context.sh
+```
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "sh ~/.claude/hooks/agent-usage-context.sh", "timeout": 10, "async": true }] }
+    ]
+  }
+}
+```
+
+**Codex:** copy the script and add it to the `Stop` hooks in `~/.codex/hooks.json`:
+```bash
+cp hooks/codex-context.sh ~/.codex/agent-usage-context.sh
+```
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "sh ~/.codex/agent-usage-context.sh", "timeout": 10 }] }
+    ]
+  }
+}
+```
+
+Restart open Claude Code and Codex sessions so they pick up the new hook. Each pane updates after its next turn.
