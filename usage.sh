@@ -107,8 +107,61 @@ update_cache_if_stale() {
     fi
 }
 
+format_epoch() {
+    if date --version >/dev/null 2>&1; then
+        date -d "@$1" "+%b %d at %-I:%M%p"
+    else
+        date -r "$1" "+%b %d at %-I:%M%p"
+    fi
+}
+
+# Converts an ISO-8601 UTC timestamp (fractional seconds allowed) to epoch
+# seconds. BSD date -j -f parses in local time, so it runs under TZ=UTC.
+iso_to_epoch() {
+    if date --version >/dev/null 2>&1; then
+        date -d "$1" +%s 2>/dev/null
+    else
+        local clean=${1%Z}
+        TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${clean%%.*}" +%s 2>/dev/null
+    fi
+}
+
+# Kimi Code has no non-interactive /usage and keeps no quota on disk, so query
+# the /usages endpoint its /usage command uses, with the OAuth token kimi keeps
+# in ~/.kimi-code/credentials. The token is short-lived and refreshed by a
+# running kimi; when it has expired the previous cache is kept.
+KIMI_HOME="$HOME/.kimi-code"
+KIMI_CACHE="/tmp/kimi_quota.json"
+
+fetch_kimi_quota() {
+    local token
+    token=$(jq -rs 'map(select((.expires_at // 0) > now)) | max_by(.expires_at) | .access_token // empty' \
+        "$KIMI_HOME"/credentials/*.json 2>/dev/null)
+    [ -n "$token" ] || return 1
+    # The header goes through stdin so the token never shows in the process list.
+    printf 'Authorization: Bearer %s' "$token" |
+        curl -sf -m 10 -H @- "${KIMI_CODE_BASE_URL:-https://api.kimi.com/coding/v1}/usages" > "${KIMI_CACHE}.tmp" 2>/dev/null &&
+        jq -e '.usages' "${KIMI_CACHE}.tmp" >/dev/null 2>&1 &&
+        mv "${KIMI_CACHE}.tmp" "$KIMI_CACHE"
+}
+
+update_kimi_cache_if_stale() {
+    [ -d "$KIMI_HOME/credentials" ] && command -v curl >/dev/null 2>&1 || return 0
+    if [ ! -f "$KIMI_CACHE" ]; then
+        echo -e "${DIM}${SUBMARGIN}Initializing kimi quota cache...${RESET}"
+        fetch_kimi_quota
+        echo -e "\033[1A\033[2K\r\c"
+    else
+        local last_mod=$(stat -c "%Y" "$KIMI_CACHE" 2>/dev/null || stat -f "%m" "$KIMI_CACHE" 2>/dev/null)
+        if [ $((CURRENT_TIME - last_mod)) -ge $CACHE_AGE_LIMIT ]; then
+            ( fetch_kimi_quota ) & disown
+        fi
+    fi
+}
+
 update_cache_if_stale "agy" "/tmp/agy_quota.txt"
 update_cache_if_stale "claude" "/tmp/claude_quota.txt"
+update_kimi_cache_if_stale
 
 if [ -f /tmp/agy_quota.txt ]; then
     echo -e "${SUBMARGIN}${CYAN}[Antigravity Quota]${RESET}"
@@ -130,6 +183,23 @@ if [ -f /tmp/claude_quota.txt ]; then
     echo ""
 fi
 
+if [ -f "$KIMI_CACHE" ]; then
+    echo -e "${SUBMARGIN}${CYAN}[Kimi Code Subscription]${RESET}"
+    jq -r '
+      [["limit_5h", "5h limit"], ["limit_7d", "Weekly limit"],
+       ["limit_month_total", "Monthly limit"], ["limit_month_code", "Monthly code limit"]][] as [$key, $label] |
+      .usages[$key] | select(. != null) |
+      ((.used_ratio // null) | tonumber? // null) as $ratio | select($ratio != null) |
+      [$label, "\($ratio * 100 | round)%", (.reset_time // "")] | @tsv
+    ' "$KIMI_CACHE" 2>/dev/null | while IFS=$'\t' read -r label pct reset; do
+        epoch=$([ -n "$reset" ] && iso_to_epoch "$reset")
+        # The cache outlives an expired token; a window that already reset is back to 0%.
+        [ -n "$epoch" ] && [ "$epoch" -lt "$CURRENT_TIME" ] && pct="0%" && epoch=""
+        printf "%-22s | %-5s | %s\n" "$label" "$pct" "${epoch:+resets $(format_epoch "$epoch")}"
+    done | sed "s/^/$SUBSUBMARGIN/" | format_bars
+    echo ""
+fi
+
 echo -e "${SUBMARGIN}${CYAN}[Other Agents (Installed & Active)]${RESET}"
 printf "${DIM}${SUBSUBMARGIN}%-10s | %-16s | %s${RESET}\n" "AGENT" "PROVIDER" "LIMIT / CAPACITY"
 echo -e "${DIM}${SUBSUBMARGIN}──────────────────────────────────────────────────────────────────────${RESET}"
@@ -144,13 +214,6 @@ done < <(jq -r '(.result.agents // []) | map(select(.tokens != null and .tokens.
 
 # Fallback for agents Herdr has no limit for: read what the agent CLI already
 # writes to its local session files. No network calls, no credentials.
-format_epoch() {
-    if date --version >/dev/null 2>&1; then
-        date -d "@$1" "+%b %d at %-I:%M%p"
-    else
-        date -r "$1" "+%b %d at %-I:%M%p"
-    fi
-}
 
 # Prints the newest file among the NUL-separated paths read from stdin.
 newest_file() {
