@@ -142,6 +142,94 @@ while IFS=$'\t' read -r agent provider limit; do
     HERDR_PROVIDERS["$agent"]="$provider"
 done < <(jq -r '(.result.agents // []) | map(select(.tokens != null and .tokens.limit != null)) | unique_by(.agent) | .[] | [ .agent, (.tokens.provider // "-"), .tokens.limit ] | @tsv' <<< "$JSON_DATA")
 
+# Fallback for agents Herdr has no limit for: read what the agent CLI already
+# writes to its local session files. No network calls, no credentials.
+format_epoch() {
+    if date --version >/dev/null 2>&1; then
+        date -d "@$1" "+%b %d at %-I:%M%p"
+    else
+        date -r "$1" "+%b %d at %-I:%M%p"
+    fi
+}
+
+# Prints the newest file among the NUL-separated paths read from stdin.
+newest_file() {
+    local newest="" file
+    while IFS= read -r -d '' file; do
+        [[ -z "$newest" || "$file" -nt "$newest" ]] && newest=$file
+    done
+    [ -n "$newest" ] && echo "$newest"
+}
+
+# Codex records its subscription limits in every token_count event of the
+# session rollouts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). Use the latest
+# snapshot from the last 7 days; it reflects the last Codex turn.
+codex_local_limit() {
+    local sessions="${CODEX_HOME:-$HOME/.codex}/sessions" rate_limits
+    [ -d "$sessions" ] || return 1
+    rate_limits=$(
+        find "$sessions" -type f -name 'rollout-*.jsonl' -mtime -7 -print0 2>/dev/null |
+            while IFS= read -r -d '' rollout; do
+                grep -h '"rate_limits":{' "$rollout" | tail -n 1
+            done |
+            jq -sc 'map(select(.payload.rate_limits != null)) | max_by(.timestamp) // empty | .payload.rate_limits' 2>/dev/null
+    )
+    [ -n "$rate_limits" ] || return 1
+
+    local plan limit="" window pct reset
+    plan=$(jq -r '.plan_type // empty' <<< "$rate_limits")
+    while IFS=$'\t' read -r window pct reset; do
+        [ -n "$limit" ] && limit+=" · "
+        limit+="$pct $window"
+        [ -n "$reset" ] && limit+=" (resets $(format_epoch "$reset"))"
+    done < <(jq -r '
+      def window: if . == null then "window"
+        elif . % 1440 == 0 then "\(. / 1440)d"
+        elif . % 60 == 0 then "\(. / 60)h"
+        else "\(.)m" end;
+      [.primary, .secondary][] | select(. != null and .used_percent != null) |
+      ((.resets_at // null) | if . == null then null else floor end) as $reset |
+      # A window that reset after the last Codex turn is back to 0%.
+      (if $reset != null and $reset < now then 0 else .used_percent end) as $used |
+      [(.window_minutes | window), "\($used | round)%", ($reset // "" | tostring)] | @tsv
+    ' <<< "$rate_limits")
+    [ -n "$limit" ] || return 1
+    printf '%s\t%s\n' "openai${plan:+ ($plan)}" "$limit"
+}
+
+# Kimi Code keeps no quota on disk, only per-session context usage: the last
+# token_counting event of the newest main-agent wire log, measured against the
+# model's max_context_size from ~/.kimi-code/config.toml.
+kimi_local_limit() {
+    local home="$HOME/.kimi-code" wire model tokens max
+    [ -d "$home/sessions" ] || return 1
+    wire=$(find "$home/sessions" -type f -path '*/agents/main/wire.jsonl' -mtime -7 -print0 2>/dev/null | newest_file) || return 1
+
+    tokens=$(grep -h '"type":"token_counting\.' "$wire" | tail -n 1 | jq -r '.tokens // empty' 2>/dev/null)
+    model=$(grep -h '"type":"usage.record"' "$wire" | tail -n 1 | jq -r '.model // empty' 2>/dev/null)
+    [ -n "$tokens" ] || return 1
+    max=$(awk -v section="[models.\"$model\"]" '
+        $0 == section { in_section = 1; next }
+        /^\[/ { in_section = 0 }
+        in_section && $1 == "max_context_size" { print $3; exit }
+    ' "$home/config.toml" 2>/dev/null)
+
+    local limit
+    if [[ "$max" =~ ^[0-9]+$ ]] && [ "$max" -gt 0 ]; then
+        limit="⛁ $((tokens * 100 / max))% context ($((tokens / 1000))k / $((max / 1000))k)"
+    else
+        limit="⛁ $((tokens / 1000))k context"
+    fi
+    printf '%s\t%s\n' "kimi-code" "$limit${model:+ · ${model#kimi-code/}}"
+}
+
+for agent in codex kimi; do
+    [ -n "${HERDR_LIMITS[$agent]:-}" ] && continue
+    IFS=$'\t' read -r provider limit < <("${agent}_local_limit") || continue
+    HERDR_LIMITS["$agent"]="$limit"
+    HERDR_PROVIDERS["$agent"]="$provider"
+done
+
 # Standard integration install directories
 declare -A KNOWN_AGENTS=(
     ["codex"]="$HOME/.codex"

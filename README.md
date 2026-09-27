@@ -9,6 +9,7 @@ A highly optimized TUI dashboard providing real-time observability into your act
 - **Smart Progress Bars:** An inline `awk` engine parses raw percentages (e.g. `82%`) and dynamically injects colorized block progress bars (e.g., `[████████░░] 82%`) into the UI without breaking layout alignments.
 - **0ms Blocking (Background Caching):** Because pulling API billing data from Claude/Gemini takes several seconds, the dashboard uses asynchronous detached background jobs (`& disown`) and a `/tmp/` cache. The dashboard pops up instantly using 5-minute stale cache windows, guaranteeing a fast UX while saving LLM tokens/API rate limits.
 - **Offline Agent Detection:** Seamlessly merges active Herdr socket limits with fallback scans of installed configuration directories (`~/.codex`, `~/.grok`, etc.) so you have a complete picture of your machine's AI capabilities even when panes are closed.
+- **Local Session Fallback:** When Herdr reports no limit for an agent, the dashboard reads what the agent CLI already writes to disk, with no network calls or credentials: Codex subscription limits from the latest `rate_limits` snapshot in `~/.codex/sessions` (or `$CODEX_HOME`), and Kimi Code context usage from the newest session log in `~/.kimi-code/sessions` against the model's `max_context_size`. Only sessions from the last 7 days are used.
 
 ## Requirements
 - `herdr` CLI
