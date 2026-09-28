@@ -292,9 +292,8 @@ codex_local_limit() {
     [ -d "$sessions" ] || return 1
     rate_limits=$(
         find "$sessions" -type f -name 'rollout-*.jsonl' -mtime -7 -print0 2>/dev/null |
-            while IFS= read -r -d '' rollout; do
-                grep -h '"rate_limits":{' "$rollout" | tail -n 1
-            done |
+            xargs -0 grep -h '"rate_limits":{' 2>/dev/null |
+
             jq -sc 'map(select(.payload.rate_limits != null)) | max_by(.timestamp) // empty | .payload.rate_limits' 2>/dev/null
     )
     [ -n "$rate_limits" ] || return 1
