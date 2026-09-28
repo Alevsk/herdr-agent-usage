@@ -71,13 +71,82 @@ echo -e "${MARGIN}${BLUE}■ AGENT CONTEXT BREAKDOWN ${RESET}"
 printf "${DIM}${SUBMARGIN}%-12s | %-9s | %-32s | %s${RESET}\n" "AGENT" "STATUS" "TASK" "CONTEXT & TOKENS"
 echo -e "${DIM}${SUBMARGIN}────────────────────────────────────────────────────────────────────────────${RESET}"
 
-jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task")] | @tsv' <<< "$JSON_DATA" | while IFS=$'\t' read -r agent status context title; do
+short_tokens() {
+    if [ "$1" -ge 1000 ]; then echo "$(( ($1 + 500) / 1000 ))k"; else echo "$1"; fi
+}
+
+# Live context of a pane, read from the session file its agent is writing, so it
+# is current even mid-turn and needs no hook. Prints nothing when unknown.
+# Claude: the transcript named by the session id Herdr tracks for the pane; the
+# context is every input token of the last main-thread request. The window size
+# is only given to the status line, so it comes from what hooks/claude-statusline.sh
+# saved for the session; without it there is no percentage.
+CLAUDE_STATUS_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-agent-usage/claude"
+
+claude_live_context() {
+    local session=$1 transcript tokens window=""
+    [ "$session" != "-" ] || return 1
+    for transcript in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$session".jsonl; do
+        [ -f "$transcript" ] && break
+    done
+    [ -f "$transcript" ] || return 1
+    tokens=$(grep -h '"type":"assistant"' "$transcript" | grep -v -e '"isSidechain":true' -e '"model":"<synthetic>"' |
+        tail -n 1 | jq -r '.message.usage | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null)
+    [[ "$tokens" =~ ^[0-9]+$ ]] && [ "$tokens" -gt 0 ] || return 1
+    [ -f "$CLAUDE_STATUS_CACHE/$session.json" ] &&
+        window=$(jq -r '.context_window.context_window_size // empty' "$CLAUDE_STATUS_CACHE/$session.json" 2>/dev/null)
+    if [[ "$window" =~ ^[0-9]+$ ]] && [ "$window" -gt 0 ]; then
+        echo "⛁ $(( (tokens * 100 + window / 2) / window ))% ($(short_tokens "$tokens"))"
+    else
+        echo "⛁ $(short_tokens "$tokens")"
+    fi
+}
+
+# Codex: Herdr has no session id for it, so use the newest rollout started in
+# the pane's working directory, against the model's context window.
+codex_live_context() {
+    local cwd=$1 sessions="${CODEX_HOME:-$HOME/.codex}/sessions" rollout used window
+    [ -d "$sessions" ] && [ "$cwd" != "-" ] || return 1
+    rollout=$(find "$sessions" -type f -name 'rollout-*.jsonl' -mtime -7 -print0 2>/dev/null |
+        while IFS= read -r -d '' file; do
+            head -n 1 "$file" | grep -qF "\"cwd\":\"$cwd\"" && printf '%s\0' "$file"
+        done | newest_file) || return 1
+    read -r used window < <(grep -h '"type":"token_count"' "$rollout" | grep '"info":{' | tail -n 1 |
+        jq -r '.payload.info | "\(.last_token_usage.total_tokens // "") \(.model_context_window // "")"' 2>/dev/null)
+    [[ "$used" =~ ^[0-9]+$ ]] || return 1
+    if [[ "$window" =~ ^[0-9]+$ ]] && [ "$window" -gt 0 ]; then
+        echo "⛁ $(( (used * 100 + window / 2) / window ))% ($(short_tokens "$used"))"
+    else
+        echo "⛁ $(short_tokens "$used")"
+    fi
+}
+
+# Prints the newest file among the NUL-separated paths read from stdin.
+newest_file() {
+    local newest="" file
+    while IFS= read -r -d '' file; do
+        [[ -z "$newest" || "$file" -nt "$newest" ]] && newest=$file
+    done
+    [ -n "$newest" ] && echo "$newest"
+}
+
+# Empty fields become "-": read collapses consecutive tabs.
+jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task"),
+    (.agent_session.value // "-"), (.foreground_cwd // .cwd // "-")] | map(if . == null or . == "" then "-" else . end) | @tsv' <<< "$JSON_DATA" |
+while IFS=$'\t' read -r agent status context title session cwd; do
+    # Prefer the live value; what Herdr holds is only as fresh as the last report.
+    live=""
+    case "$agent" in
+        claude) live=$(claude_live_context "$session") ;;
+        codex) live=$(codex_live_context "$cwd") ;;
+    esac
+    [ -n "$live" ] && context=$live
     status_c=$([ "$status" = "working" ] && echo "$GREEN" || echo "$YELLOW")
     [ ${#title} -gt 31 ] && title="${title:0:28}..."
     context_c=$([ "$context" != "-" ] && echo "$CYAN" || echo "$DIM")
     printf "${SUBMARGIN}${BOLD}${WHITE}%-12s${RESET} | ${status_c}%-9s${RESET} | ${WHITE}%-32s${RESET} | ${context_c}%s${RESET}\n" "$agent" "$status" "$title" "$context" | format_bars
 done
-echo -e "${DIM}${SUBMARGIN}* Note: \"-\" means the agent is idle, new, or its CLI lacks Herdr token hook support (e.g. agy).${RESET}"
+echo -e "${DIM}${SUBMARGIN}* Claude and Codex context is read live from their session files; Claude shows a percentage once hooks/claude-statusline.sh has run. \"-\" means no data yet.${RESET}"
 echo ""
 
 echo -e "\n${MARGIN}${YELLOW}■ SUBSCRIPTION LIMITS ${RESET}"
@@ -107,8 +176,61 @@ update_cache_if_stale() {
     fi
 }
 
+format_epoch() {
+    if date --version >/dev/null 2>&1; then
+        date -d "@$1" "+%b %d at %-I:%M%p"
+    else
+        date -r "$1" "+%b %d at %-I:%M%p"
+    fi
+}
+
+# Converts an ISO-8601 UTC timestamp (fractional seconds allowed) to epoch
+# seconds. BSD date -j -f parses in local time, so it runs under TZ=UTC.
+iso_to_epoch() {
+    if date --version >/dev/null 2>&1; then
+        date -d "$1" +%s 2>/dev/null
+    else
+        local clean=${1%Z}
+        TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${clean%%.*}" +%s 2>/dev/null
+    fi
+}
+
+# Kimi Code has no non-interactive /usage and keeps no quota on disk, so query
+# the /usages endpoint its /usage command uses, with the OAuth token kimi keeps
+# in ~/.kimi-code/credentials. The token is short-lived and refreshed by a
+# running kimi; when it has expired the previous cache is kept.
+KIMI_HOME="$HOME/.kimi-code"
+KIMI_CACHE="/tmp/kimi_quota.json"
+
+fetch_kimi_quota() {
+    local token
+    token=$(jq -rs 'map(select((.expires_at // 0) > now)) | max_by(.expires_at) | .access_token // empty' \
+        "$KIMI_HOME"/credentials/*.json 2>/dev/null)
+    [ -n "$token" ] || return 1
+    # The header goes through stdin so the token never shows in the process list.
+    printf 'Authorization: Bearer %s' "$token" |
+        curl -sf -m 10 -H @- "${KIMI_CODE_BASE_URL:-https://api.kimi.com/coding/v1}/usages" > "${KIMI_CACHE}.tmp" 2>/dev/null &&
+        jq -e '.usages' "${KIMI_CACHE}.tmp" >/dev/null 2>&1 &&
+        mv "${KIMI_CACHE}.tmp" "$KIMI_CACHE"
+}
+
+update_kimi_cache_if_stale() {
+    [ -d "$KIMI_HOME/credentials" ] && command -v curl >/dev/null 2>&1 || return 0
+    if [ ! -f "$KIMI_CACHE" ]; then
+        echo -e "${DIM}${SUBMARGIN}Initializing kimi quota cache...${RESET}"
+        fetch_kimi_quota
+        echo -e "\033[1A\033[2K\r\c"
+    else
+        local last_mod=$(stat -c "%Y" "$KIMI_CACHE" 2>/dev/null || stat -f "%m" "$KIMI_CACHE" 2>/dev/null)
+        if [ $((CURRENT_TIME - last_mod)) -ge $CACHE_AGE_LIMIT ]; then
+            ( fetch_kimi_quota ) & disown
+        fi
+    fi
+}
+
 update_cache_if_stale "agy" "/tmp/agy_quota.txt"
 update_cache_if_stale "claude" "/tmp/claude_quota.txt"
+update_kimi_cache_if_stale
 
 if [ -f /tmp/agy_quota.txt ]; then
     echo -e "${SUBMARGIN}${CYAN}[Antigravity Quota]${RESET}"
@@ -130,6 +252,23 @@ if [ -f /tmp/claude_quota.txt ]; then
     echo ""
 fi
 
+if [ -f "$KIMI_CACHE" ]; then
+    echo -e "${SUBMARGIN}${CYAN}[Kimi Code Subscription]${RESET}"
+    jq -r '
+      [["limit_5h", "5h limit"], ["limit_7d", "Weekly limit"],
+       ["limit_month_total", "Monthly limit"], ["limit_month_code", "Monthly code limit"]][] as [$key, $label] |
+      .usages[$key] | select(. != null) |
+      ((.used_ratio // null) | tonumber? // null) as $ratio | select($ratio != null) |
+      [$label, "\($ratio * 100 | round)%", (.reset_time // "")] | @tsv
+    ' "$KIMI_CACHE" 2>/dev/null | while IFS=$'\t' read -r label pct reset; do
+        epoch=$([ -n "$reset" ] && iso_to_epoch "$reset")
+        # The cache outlives an expired token; a window that already reset is back to 0%.
+        [ -n "$epoch" ] && [ "$epoch" -lt "$CURRENT_TIME" ] && pct="0%" && epoch=""
+        printf "%-22s | %-5s | %s\n" "$label" "$pct" "${epoch:+resets $(format_epoch "$epoch")}"
+    done | sed "s/^/$SUBSUBMARGIN/" | format_bars
+    echo ""
+fi
+
 echo -e "${SUBMARGIN}${CYAN}[Other Agents (Installed & Active)]${RESET}"
 printf "${DIM}${SUBSUBMARGIN}%-10s | %-16s | %s${RESET}\n" "AGENT" "PROVIDER" "LIMIT / CAPACITY"
 echo -e "${DIM}${SUBSUBMARGIN}──────────────────────────────────────────────────────────────────────${RESET}"
@@ -141,6 +280,77 @@ while IFS=$'\t' read -r agent provider limit; do
     HERDR_LIMITS["$agent"]="$limit"
     HERDR_PROVIDERS["$agent"]="$provider"
 done < <(jq -r '(.result.agents // []) | map(select(.tokens != null and .tokens.limit != null)) | unique_by(.agent) | .[] | [ .agent, (.tokens.provider // "-"), .tokens.limit ] | @tsv' <<< "$JSON_DATA")
+
+# Fallback for agents Herdr has no limit for: read what the agent CLI already
+# writes to its local session files. No network calls, no credentials.
+
+# Codex records its subscription limits in every token_count event of the
+# session rollouts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). Use the latest
+# snapshot from the last 7 days; it reflects the last Codex turn.
+codex_local_limit() {
+    local sessions="${CODEX_HOME:-$HOME/.codex}/sessions" rate_limits
+    [ -d "$sessions" ] || return 1
+    rate_limits=$(
+        find "$sessions" -type f -name 'rollout-*.jsonl' -mtime -7 -print0 2>/dev/null |
+            xargs -0 grep -h '"rate_limits":{' 2>/dev/null |
+
+            jq -sc 'map(select(.payload.rate_limits != null)) | max_by(.timestamp) // empty | .payload.rate_limits' 2>/dev/null
+    )
+    [ -n "$rate_limits" ] || return 1
+
+    local plan limit="" window pct reset
+    plan=$(jq -r '.plan_type // empty' <<< "$rate_limits")
+    while IFS=$'\t' read -r window pct reset; do
+        [ -n "$limit" ] && limit+=" · "
+        limit+="$pct $window"
+        [ -n "$reset" ] && limit+=" (resets $(format_epoch "$reset"))"
+    done < <(jq -r '
+      def window: if . == null then "window"
+        elif . % 1440 == 0 then "\(. / 1440)d"
+        elif . % 60 == 0 then "\(. / 60)h"
+        else "\(.)m" end;
+      [.primary, .secondary][] | select(. != null and .used_percent != null) |
+      ((.resets_at // null) | if . == null then null else floor end) as $reset |
+      # A window that reset after the last Codex turn is back to 0%.
+      (if $reset != null and $reset < now then 0 else .used_percent end) as $used |
+      [(.window_minutes | window), "\($used | round)%", ($reset // "" | tostring)] | @tsv
+    ' <<< "$rate_limits")
+    [ -n "$limit" ] || return 1
+    printf '%s\t%s\n' "openai${plan:+ ($plan)}" "$limit"
+}
+
+# Kimi Code keeps no quota on disk, only per-session context usage: the last
+# token_counting event of the newest main-agent wire log, measured against the
+# model's max_context_size from ~/.kimi-code/config.toml.
+kimi_local_limit() {
+    local home="$HOME/.kimi-code" wire model tokens max
+    [ -d "$home/sessions" ] || return 1
+    wire=$(find "$home/sessions" -type f -path '*/agents/main/wire.jsonl' -mtime -7 -print0 2>/dev/null | newest_file) || return 1
+
+    tokens=$(grep -h '"type":"token_counting\.' "$wire" | tail -n 1 | jq -r '.tokens // empty' 2>/dev/null)
+    model=$(grep -h '"type":"usage.record"' "$wire" | tail -n 1 | jq -r '.model // empty' 2>/dev/null)
+    [ -n "$tokens" ] || return 1
+    max=$(awk -v section="[models.\"$model\"]" '
+        $0 == section { in_section = 1; next }
+        /^\[/ { in_section = 0 }
+        in_section && $1 == "max_context_size" { print $3; exit }
+    ' "$home/config.toml" 2>/dev/null)
+
+    local limit
+    if [[ "$max" =~ ^[0-9]+$ ]] && [ "$max" -gt 0 ]; then
+        limit="⛁ $((tokens * 100 / max))% context ($((tokens / 1000))k / $((max / 1000))k)"
+    else
+        limit="⛁ $((tokens / 1000))k context"
+    fi
+    printf '%s\t%s\n' "kimi-code" "$limit${model:+ · ${model#kimi-code/}}"
+}
+
+for agent in codex kimi; do
+    [ -n "${HERDR_LIMITS[$agent]:-}" ] && continue
+    IFS=$'\t' read -r provider limit < <("${agent}_local_limit") || continue
+    HERDR_LIMITS["$agent"]="$limit"
+    HERDR_PROVIDERS["$agent"]="$provider"
+done
 
 # Standard integration install directories
 declare -A KNOWN_AGENTS=(
