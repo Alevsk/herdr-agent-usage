@@ -386,7 +386,14 @@ for agent in "${GROUP_ORDER[@]}"; do
                 usage=$(quota_claude_cached_usage "$(quota_cache_path claude "$id")")
                 [ -n "$usage" ] || usage=$(quota_claude_local_usage "${ACC_HOME[$local_key]}")
                 usage=${usage:--}
-                printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "$usage"
+                first=1
+                while IFS= read -r line; do
+                    if [ "$first" -eq 1 ]; then
+                        printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "$line"; first=0
+                    else
+                        printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "" 28)" "$(pad_cols "" 13)" "$line"
+                    fi
+                done <<< "$usage"
                 ;;
             agy)
                 render_agy_account "$id" "$cell"

@@ -35,7 +35,21 @@ quota_store() { # <agent> <account_id> <ext> <cmd...> — run cmd, cache stdout 
 }
 
 # ── fetchers (stdout only; no credentials on command lines) ────────────────
-quota_fetch_claude() { CLAUDE_CONFIG_DIR="$1" claude -p "/usage"; }
+quota_claude_usage_is_valid() { # reads stdin, passes through when valid
+    local out; out=$(cat)
+    if grep -qE '% used|Last 7d|subscription' <<<"$out"; then printf '%s' "$out"; else return 1; fi
+}
+
+quota_fetch_claude() { # <home>
+    # Explicit CLAUDE_CONFIG_DIR on the implicit default home makes the CLI
+    # print a result footer instead of the /usage report; only set it for
+    # non-default homes and scrub it for the default.
+    if [ "$1" = "$HOME/.claude" ]; then
+        env -u CLAUDE_CONFIG_DIR claude -p "/usage" | quota_claude_usage_is_valid
+    else
+        CLAUDE_CONFIG_DIR="$1" claude -p "/usage" | quota_claude_usage_is_valid
+    fi
+}
 quota_fetch_agy()    { agy -p "/usage" | awk -F'\t' 'NF >= 3 && $1 != "Quota:"'; }
 quota_fetch_kimi() {
     local token
@@ -53,7 +67,13 @@ quota_store_claude_identity() { # <account_id> <home> — keychain-auth homes ha
     local cache; cache=$(quota_identity_cache_path "$1")
     mkdir -p "$(dirname "$cache")"
     local out
-    out=$(CLAUDE_CONFIG_DIR="$2" claude auth status 2>/dev/null) || return 1
+    # Same default-home quirk as quota_fetch_claude: explicit CLAUDE_CONFIG_DIR
+    # hides the keychain login from `claude auth status`, so scrub it there too.
+    if [ "$2" = "$HOME/.claude" ]; then
+        out=$(env -u CLAUDE_CONFIG_DIR claude auth status 2>/dev/null) || return 1
+    else
+        out=$(CLAUDE_CONFIG_DIR="$2" claude auth status 2>/dev/null) || return 1
+    fi
     jq -e '.loggedIn == true and (.email // "") != ""' <<<"$out" >/dev/null 2>&1 || return 1
     # mktemp only after validation, so no early return can leave a tmp file behind
     local tmp; tmp=$(mktemp "${cache}.tmp.XXXXXX") || return 1
@@ -95,8 +115,12 @@ quota_claude_local_usage() { # <home> → "7d · N req · N sessions" from stats
     ' "$f" 2>/dev/null
 }
 
-quota_claude_cached_usage() { # <cache-file> → summary line from `claude -p /usage`
+quota_claude_cached_usage() { # <cache-file> → usage lines from `claude -p /usage`
     [ -f "$1" ] || return 1
-    grep -oE 'Last 7d · [0-9]+ requests? · [0-9]+ sessions?' "$1" 2>/dev/null | head -n 1 |
-        sed 's/^Last //'
+    {
+        grep '% used' "$1" 2>/dev/null | head -n 4
+        grep -oE 'Last 7d · [0-9]+ requests? · [0-9]+ sessions?' "$1" 2>/dev/null | head -n 1 |
+            sed 's/^Last //'
+        grep -E '[0-9]+%' "$1" 2>/dev/null
+    } | awk '!seen[$0]++' | head -n 6
 }

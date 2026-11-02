@@ -49,9 +49,17 @@ h2="$FIX/home2"; mkdir -p "$h2"
 jq -n --arg o "$old" '{dailyActivity:[{date:$o, messageCount:999, sessionCount:9}]}' > "$h2/stats-cache.json"
 ok "local 7d no data" "0" "$(quota_claude_local_usage "$h2" >/dev/null && echo 1 || echo 0)"
 
-# cached /usage text extraction
-printf 'header\nLast 7d · 32334 requests · 20 sessions\ntrailer\n' > "$FIX/q.txt"
-ok "cached usage line" "7d · 32334 requests · 20 sessions" "$(quota_claude_cached_usage "$FIX/q.txt")"
+# cached /usage text extraction: hard-limit lines first, then the 7d summary,
+# then any other %-carrying line not already captured
+printf 'header\nCurrent session: 3%% used · resets Nov 2 at 4:20pm\nCurrent week (all models): 49%% used · resets Nov 8 at 7am\nLast 24h · 15697 requests · 6 sessions\n  98%% of your usage came from sessions active for 8+ hours\nLast 7d · 32334 requests · 20 sessions\ntrailer\n' > "$FIX/q.txt"
+ok "cached usage multi-line" "Current session: 3% used · resets Nov 2 at 4:20pm
+Current week (all models): 49% used · resets Nov 8 at 7am
+7d · 32334 requests · 20 sessions
+  98% of your usage came from sessions active for 8+ hours" "$(quota_claude_cached_usage "$FIX/q.txt")"
+
+# summary-only cache still renders the single summary line (backward compat)
+printf 'Last 7d · 32334 requests · 20 sessions\n' > "$FIX/q2.txt"
+ok "cached usage summary fallback" "7d · 32334 requests · 20 sessions" "$(quota_claude_cached_usage "$FIX/q2.txt")"
 
 # agy fetch filters malformed rows (shape check before caching)
 mkdir -p "$FIX/bin"

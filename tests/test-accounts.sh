@@ -31,6 +31,11 @@ mkdir -p "${TMPDIR}/herdr-agent-usage/identity/claude"
 jq -n '{email:"lenin@alevsk.com", subscriptionType:"pro"}' \
     > "${TMPDIR}/herdr-agent-usage/identity/claude/.claude-lenin.json"
 
+mkdir -p "$H/.claude-org"                               # email-shaped org name, no seatTier → plan "-"
+jq -n --arg org "org@x.dev's Organization" \
+    '{oauthAccount:{emailAddress:"org@x.dev", organizationName:$org}}' \
+    > "$H/.claude-org/.claude.json"
+
 mkdir -p "$H/.claude-work/projects/projA"              # oauth identity + transcript for resolve
 jq -n '{oauthAccount:{emailAddress:"alevsk@websec.mx", seatTier:"team_standard"}}' \
     > "$H/.claude-work/.claude.json"
@@ -75,6 +80,7 @@ GOT=$(bash lib/accounts.sh list)
 WANT=$(printf '%s\n' \
 "claude	.claude	default	alevsk.8772@gmail.com	max5	$H/.claude" \
 "claude	.claude-lenin	Lenin	lenin@alevsk.com	pro	$H/.claude-lenin" \
+"claude	.claude-org	org	org@x.dev	-	$H/.claude-org" \
 "claude	.claude-work	W3B	alevsk@websec.mx	team_standard	$H/.claude-work" \
 "claude	custom-claude	custom	custom@x.dev	pro	$H/custom-claude" \
 "agy	default	default	aguy@gmail.com	-	$H/.gemini" \

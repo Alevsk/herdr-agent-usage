@@ -66,6 +66,11 @@ mkdir -p "${TMPDIR}/herdr-agent-usage/identity/claude"
 jq -n '{email:"lenin@alevsk.com", subscriptionType:"pro"}' \
     > "${TMPDIR}/herdr-agent-usage/identity/claude/.claude-lenin.json"
 
+mkdir -p "$H/.claude-org"                              # email-shaped org name, no seatTier → plan "-"
+jq -n --arg org "org@x.dev's Organization" \
+    '{oauthAccount:{emailAddress:"org@x.dev", organizationName:$org}}' \
+    > "$H/.claude-org/.claude.json"
+
 mkdir -p "$H/.claude-work/projects/projA"              # oauth identity + transcript for resolve
 jq -n '{oauthAccount:{emailAddress:"alevsk@websec.mx", seatTier:"team_standard"}}' \
     > "$H/.claude-work/.claude.json"
@@ -109,6 +114,7 @@ GOT=$(bash lib/accounts.sh list)
 WANT=$(printf '%s\n' \
 "claude	.claude	default	alevsk.8772@gmail.com	max5	$H/.claude" \
 "claude	.claude-lenin	Lenin	lenin@alevsk.com	pro	$H/.claude-lenin" \
+"claude	.claude-org	org	org@x.dev	-	$H/.claude-org" \
 "claude	.claude-work	W3B	alevsk@websec.mx	team_standard	$H/.claude-work" \
 "claude	custom-claude	custom	custom@x.dev	pro	$H/custom-claude" \
 "agy	default	default	aguy@gmail.com	-	$H/.gemini" \
@@ -577,7 +583,7 @@ quota_claude_cached_usage() { # <cache-file> → summary line from `claude -p /u
 - [ ] **Step 3: Run both test scripts**
 
 Run: `bash tests/test-quota.sh && bash tests/test-accounts.sh`
-Expected: `pass=11 fail=0` and `pass=5 fail=0`, exit 0.
+Expected: `pass=12 fail=0` and `pass=5 fail=0`, exit 0.
 
 - [ ] **Step 4: Commit**
 
@@ -902,7 +908,7 @@ git -c commit.gpgsign=false commit -m "feat: unified per-account subscription gr
 - [ ] **Step 2: Run everything**
 
 Run: `bash tests/test-accounts.sh && bash tests/test-quota.sh && printf 'q' | bash usage.sh | head -60`
-Expected: test-quota `pass=11 fail=0` and test-accounts `pass=5 fail=0`; dashboard renders groups as in Task 5.
+Expected: test-quota `pass=12 fail=0` and test-accounts `pass=5 fail=0`; dashboard renders groups as in Task 5.
 
 - [ ] **Step 3: Manual visual check** — press `prefix+u` in Herdr; confirm the layout matches the smoke output and bars align.
 

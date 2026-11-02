@@ -133,7 +133,9 @@ accounts_list_claude() {
         done < <(jq -r '
             (.oauthAccount // {}) as $oa |
             select(($oa.emailAddress // "") != "") |
-            [input_filename, $oa.emailAddress, ($oa.seatTier // $oa.organizationName // "-")] | @tsv
+            # organizationName that just mirrors the email is not a real plan label
+            ($oa.seatTier // (($oa.organizationName // "") | if . == "" or test("@") then "-" else . end)) as $plan |
+            [input_filename, $oa.emailAddress, $plan] | @tsv
         ' "${jfiles[@]}" 2>/dev/null)
     fi
     for dir in "${dirs[@]}"; do
