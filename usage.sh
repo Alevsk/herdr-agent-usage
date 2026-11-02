@@ -183,30 +183,7 @@ echo ""
 
 echo -e "\n${MARGIN}${YELLOW}■ SUBSCRIPTION LIMITS ${RESET}"
 
-CACHE_AGE_LIMIT=300
 CURRENT_TIME=$(date +%s)
-
-update_cache_if_stale() {
-    local cmd=$1
-    local cache_file=$2
-
-    if [ ! -f "$cache_file" ]; then
-        if command -v "$cmd" >/dev/null 2>&1; then
-            echo -e "${DIM}${SUBMARGIN}Initializing $cmd quota cache...${RESET}"
-            "$cmd" -p "/usage" > "${cache_file}.tmp" 2>/dev/null && mv "${cache_file}.tmp" "$cache_file"
-            echo -e "\033[1A\033[2K\r\c"
-        fi
-    else
-        local last_mod=$(stat -c "%Y" "$cache_file" 2>/dev/null || stat -f "%m" "$cache_file" 2>/dev/null)
-        if [ $((CURRENT_TIME - last_mod)) -ge $CACHE_AGE_LIMIT ]; then
-            (
-                if command -v "$cmd" >/dev/null 2>&1; then
-                    "$cmd" -p "/usage" > "${cache_file}.tmp" 2>/dev/null && mv "${cache_file}.tmp" "$cache_file"
-                fi
-            ) & disown
-        fi
-    fi
-}
 
 format_epoch() {
     if date --version >/dev/null 2>&1; then
@@ -227,84 +204,6 @@ iso_to_epoch() {
     fi
 }
 
-# Kimi Code has no non-interactive /usage and keeps no quota on disk, so query
-# the /usages endpoint its /usage command uses, with the OAuth token kimi keeps
-# in ~/.kimi-code/credentials. The token is short-lived and refreshed by a
-# running kimi; when it has expired the previous cache is kept.
-KIMI_HOME="$HOME/.kimi-code"
-KIMI_CACHE="/tmp/kimi_quota.json"
-
-fetch_kimi_quota() {
-    local token
-    token=$(jq -rs 'map(select((.expires_at // 0) > now)) | max_by(.expires_at) | .access_token // empty' \
-        "$KIMI_HOME"/credentials/*.json 2>/dev/null)
-    [ -n "$token" ] || return 1
-    # The header goes through stdin so the token never shows in the process list.
-    printf 'Authorization: Bearer %s' "$token" |
-        curl -sf -m 10 -H @- "${KIMI_CODE_BASE_URL:-https://api.kimi.com/coding/v1}/usages" > "${KIMI_CACHE}.tmp" 2>/dev/null &&
-        jq -e '.usages' "${KIMI_CACHE}.tmp" >/dev/null 2>&1 &&
-        mv "${KIMI_CACHE}.tmp" "$KIMI_CACHE"
-}
-
-update_kimi_cache_if_stale() {
-    [ -d "$KIMI_HOME/credentials" ] && command -v curl >/dev/null 2>&1 || return 0
-    if [ ! -f "$KIMI_CACHE" ]; then
-        echo -e "${DIM}${SUBMARGIN}Initializing kimi quota cache...${RESET}"
-        fetch_kimi_quota
-        echo -e "\033[1A\033[2K\r\c"
-    else
-        local last_mod=$(stat -c "%Y" "$KIMI_CACHE" 2>/dev/null || stat -f "%m" "$KIMI_CACHE" 2>/dev/null)
-        if [ $((CURRENT_TIME - last_mod)) -ge $CACHE_AGE_LIMIT ]; then
-            ( fetch_kimi_quota ) & disown
-        fi
-    fi
-}
-
-update_cache_if_stale "agy" "/tmp/agy_quota.txt"
-update_cache_if_stale "claude" "/tmp/claude_quota.txt"
-update_kimi_cache_if_stale
-
-if [ -f /tmp/agy_quota.txt ]; then
-    echo -e "${SUBMARGIN}${CYAN}[Antigravity Quota]${RESET}"
-    grep -v "Quota:" /tmp/agy_quota.txt | while IFS=$'	' read -r model limit pct reset; do
-        if date --version >/dev/null 2>&1; then
-            reset_local=$(date -d "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
-        else
-            reset_local=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
-        fi
-        reset_local=${reset_local:-$reset}
-        printf "%-22s | %-25s | %-5s | %s\n" "$model" "$limit" "$pct" "$reset_local"
-    done | sed "s/^/$SUBSUBMARGIN/" | format_bars
-    echo ""
-fi
-
-if [ -f /tmp/claude_quota.txt ]; then
-    echo -e "${SUBMARGIN}${CYAN}[Claude Subscription]${RESET}"
-    awk -v prefix="$SUBSUBMARGIN" '/used/{print prefix $0}' /tmp/claude_quota.txt | format_bars
-    echo ""
-fi
-
-if [ -f "$KIMI_CACHE" ]; then
-    echo -e "${SUBMARGIN}${CYAN}[Kimi Code Subscription]${RESET}"
-    jq -r '
-      [["limit_5h", "5h limit"], ["limit_7d", "Weekly limit"],
-       ["limit_month_total", "Monthly limit"], ["limit_month_code", "Monthly code limit"]][] as [$key, $label] |
-      .usages[$key] | select(. != null) |
-      ((.used_ratio // null) | tonumber? // null) as $ratio | select($ratio != null) |
-      [$label, "\($ratio * 100 | round)%", (.reset_time // "")] | @tsv
-    ' "$KIMI_CACHE" 2>/dev/null | while IFS=$'\t' read -r label pct reset; do
-        epoch=$([ -n "$reset" ] && iso_to_epoch "$reset")
-        # The cache outlives an expired token; a window that already reset is back to 0%.
-        [ -n "$epoch" ] && [ "$epoch" -lt "$CURRENT_TIME" ] && pct="0%" && epoch=""
-        printf "%-22s | %-5s | %s\n" "$label" "$pct" "${epoch:+resets $(format_epoch "$epoch")}"
-    done | sed "s/^/$SUBSUBMARGIN/" | format_bars
-    echo ""
-fi
-
-echo -e "${SUBMARGIN}${CYAN}[Other Agents (Installed & Active)]${RESET}"
-printf "${DIM}${SUBSUBMARGIN}%-10s | %-16s | %s${RESET}\n" "AGENT" "PROVIDER" "LIMIT / CAPACITY"
-echo -e "${DIM}${SUBSUBMARGIN}──────────────────────────────────────────────────────────────────────${RESET}"
-
 # Parse active limits natively reported by Herdr
 declare -A HERDR_LIMITS
 declare -A HERDR_PROVIDERS
@@ -319,8 +218,8 @@ done < <(jq -r '(.result.agents // []) | map(select(.tokens != null and .tokens.
 # Codex records its subscription limits in every token_count event of the
 # session rollouts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). Use the latest
 # snapshot from the last 7 days; it reflects the last Codex turn.
-codex_local_limit() {
-    local sessions="${CODEX_HOME:-$HOME/.codex}/sessions" rate_limits
+codex_local_limit() { # <home>
+    local sessions="$1/sessions" rate_limits
     [ -d "$sessions" ] || return 1
     rate_limits=$(
         find "$sessions" -type f -name 'rollout-*.jsonl' -mtime -7 -print0 2>/dev/null |
@@ -378,8 +277,12 @@ kimi_local_limit() {
 }
 
 for agent in codex kimi; do
+    [ -z "${AGENT_HAS[$agent]:-}" ] || continue
     [ -n "${HERDR_LIMITS[$agent]:-}" ] && continue
-    IFS=$'\t' read -r provider limit < <("${agent}_local_limit") || continue
+    case "$agent" in
+        codex) IFS=$'\t' read -r provider limit < <(codex_local_limit "${ACC_HOME[codex/.codex]:-$HOME/.codex}") || continue ;;
+        kimi)  IFS=$'\t' read -r provider limit < <(kimi_local_limit) || continue ;;
+    esac
     HERDR_LIMITS["$agent"]="$limit"
     HERDR_PROVIDERS["$agent"]="$provider"
 done
@@ -399,11 +302,145 @@ declare -A KNOWN_AGENTS=(
 # Merge HERDR_LIMITS keys and KNOWN_AGENTS keys safely (bash)
 ALL_AGENTS=($(echo "${!HERDR_LIMITS[@]}" "${!KNOWN_AGENTS[@]}" | tr ' ' '\n' | sort -u))
 
+# ── quota caches: first open initializes in parallel, then async refresh ────
+declare -a QUOTA_INIT=()
+while IFS=$'\t' read -r a id label email plan home; do
+    case "$a" in
+        claude)
+            quota_refresh_async_identity "$id" "$home"   # self-checks 1h TTL
+            [ -f "$(quota_cache_path claude "$id")" ] || QUOTA_INIT+=("claude|$id|txt|$home")
+            ;;
+        agy)  [ -f "$(quota_cache_path agy "$id")" ] || QUOTA_INIT+=("agy|$id|txt|$home") ;;
+        kimi) [ -f "$(quota_cache_path kimi "$id" json)" ] || QUOTA_INIT+=("kimi|$id|json|$home") ;;
+    esac
+done <<< "$ACC_TSV"
+
+if [ ${#QUOTA_INIT[@]} -gt 0 ]; then
+    echo -e "${DIM}${SUBMARGIN}Initializing quota caches...${RESET}"
+    for job in "${QUOTA_INIT[@]}"; do
+        IFS='|' read -r a id ext home <<< "$job"
+        quota_dispatch "$a" "$id" "$ext" "$home" &
+    done
+    wait
+    echo -e "\033[1A\033[2K\r\c"
+fi
+
+# stale refreshes happen in the background, never blocking the popup
+while IFS=$'\t' read -r a id label email plan home; do
+    case "$a" in
+        claude) quota_is_fresh "$(quota_cache_path claude "$id")" || quota_refresh_async claude "$id" txt "$home" ;;
+        agy)    quota_is_fresh "$(quota_cache_path agy "$id")"    || quota_refresh_async agy    "$id" txt "$home" ;;
+        kimi)   quota_is_fresh "$(quota_cache_path kimi "$id" json)" || quota_refresh_async kimi "$id" json "$home" ;;
+    esac
+done <<< "$ACC_TSV"
+
+# ── unified per-agent groups ────────────────────────────────────────────────
+truncate_cell() { # <text> <width>
+    [ ${#1} -gt "$2" ] && echo "${1:0:$(( $2 - 1 ))}…" || echo "$1"
+}
+
+render_account_cell() { # <label> <email> → "label · email" truncated to 28
+    local cell="$1"
+    [ "$2" != "-" ] && [ -n "$2" ] && cell="$1 · $2"
+    truncate_cell "$cell" 28
+}
+
+render_agy_account() { # <account_id> <account_cell> — agy TSV rows, single usage column
+    local cache; cache=$(quota_cache_path agy "$1")
+    [ -f "$cache" ] || { printf "%s | %s | %s\n" "$(pad_cols "$2" 28)" "$(pad_cols "-" 13)" "-"; return; }
+    local first=1 model limit pct reset reset_local
+    grep -v "Quota:" "$cache" | while IFS=$'\t' read -r model limit pct reset; do
+        if date --version >/dev/null 2>&1; then
+            reset_local=$(date -d "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
+        else
+            reset_local=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
+        fi
+        reset_local=${reset_local:-$reset}
+        if [ "$first" -eq 1 ]; then
+            printf "%s | %s | %s\n" "$(pad_cols "$2" 28)" "$(pad_cols "-" 13)" "$model · $limit · $pct · $reset_local"
+            first=0
+        else
+            printf "%s | %s | %s\n" "$(pad_cols "" 28)" "$(pad_cols "" 13)" "$model · $limit · $pct · $reset_local"
+        fi
+    done
+}
+
+GROUP_ORDER=(claude agy codex grok opencode kimi)
+for agent in "${GROUP_ORDER[@]}"; do
+    ids=$(awk -F'\t' -v a="$agent" '$1 == a { print $2 }' <<< "$ACC_TSV")
+    [ -n "$ids" ] || continue
+    echo -e "${SUBMARGIN}${CYAN}[$agent]${RESET}"
+    printf "${DIM}${SUBSUBMARGIN}%-28s | %-13s | %s${RESET}\n" "ACCOUNT" "PLAN" "USAGE & LIMITS"
+    while IFS= read -r id; do
+        local_key="$agent/$id"
+        cell=$(render_account_cell "${ACC_LABEL[$local_key]}" "${ACC_EMAIL[$local_key]}")
+        plan=$(truncate_cell "${ACC_PLAN[$local_key]:--}" 13)
+        usage=""
+        case "$agent" in
+            claude)
+                usage=$(quota_claude_cached_usage "$(quota_cache_path claude "$id")")
+                [ -n "$usage" ] || usage=$(quota_claude_local_usage "${ACC_HOME[$local_key]}")
+                usage=${usage:--}
+                printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "$usage"
+                ;;
+            agy)
+                render_agy_account "$id" "$cell" | sed "s/^/$SUBSUBMARGIN/"
+                ;;
+            codex)
+                if [ -n "${HERDR_LIMITS[codex]:-}" ] && [ "$id" = ".codex" ]; then
+                    usage="${HERDR_LIMITS[codex]}"
+                else
+                    IFS=$'\t' read -r _ usage < <(codex_local_limit "${ACC_HOME[$local_key]}")
+                fi
+                printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "${usage:--}"
+                ;;
+            grok)
+                if [ -n "${HERDR_LIMITS[grok]:-}" ] && [ "$id" = "$(awk -F'\t' -v a=grok '$1==a{print $2; exit}' <<< "$ACC_TSV")" ]; then
+                    usage="${HERDR_LIMITS[grok]}"
+                else
+                    usage="-"
+                fi
+                printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "$usage"
+                ;;
+            kimi)
+                cache=$(quota_cache_path kimi "$id" json)
+                [ -f "$cache" ] || { printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "-"; continue; }
+                jq -r '
+                  [["limit_5h", "5h limit"], ["limit_7d", "Weekly limit"],
+                   ["limit_month_total", "Monthly limit"], ["limit_month_code", "Monthly code limit"]][] as [$key, $label] |
+                  .usages[$key] | select(. != null) |
+                  ((.used_ratio // null) | tonumber? // null) as $ratio | select($ratio != null) |
+                  [$label, "\($ratio * 100 | round)%", (.reset_time // "")] | @tsv
+                ' "$cache" 2>/dev/null | {
+                    first=1
+                    while IFS=$'\t' read -r label pct reset; do
+                        epoch=$([ -n "$reset" ] && iso_to_epoch "$reset")
+                        # The cache outlives an expired token; a window that already reset is back to 0%.
+                        [ -n "$epoch" ] && [ "$epoch" -lt "$CURRENT_TIME" ] && pct="0%" && epoch=""
+                        line="$label $pct${epoch:+ · resets $(format_epoch "$epoch")}"
+                        if [ "$first" -eq 1 ]; then
+                            printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "$line"; first=0
+                        else
+                            printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "" 28)" "$(pad_cols "" 13)" "$line"
+                        fi
+                    done
+                }
+                ;;
+            *)
+                printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "-"
+                ;;
+        esac
+    done <<< "$ids" | format_bars
+    echo ""
+done
+
+echo -e "${SUBMARGIN}${CYAN}[Other Agents (Installed & Active)]${RESET}"
+printf "${DIM}${SUBSUBMARGIN}%-10s | %-16s | %s${RESET}\n" "AGENT" "PROVIDER" "LIMIT / CAPACITY"
+echo -e "${DIM}${SUBSUBMARGIN}──────────────────────────────────────────────────────────────────────${RESET}"
+
 for agent in "${ALL_AGENTS[@]}"; do
-    # Skip agy and claude as they have dedicated top-level quota sections
-    if [ "$agent" = "agy" ] || [ "$agent" = "claude" ]; then
-        continue
-    fi
+    # Agents with registry accounts render as groups above
+    [ -n "${AGENT_HAS[$agent]:-}" ] && continue
     
     is_installed=0
     if [ -n "${KNOWN_AGENTS[$agent]:-}" ] && [ -d "${KNOWN_AGENTS[$agent]}" ]; then
