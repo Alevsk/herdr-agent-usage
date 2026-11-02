@@ -48,6 +48,12 @@ format_bars() {
     }'
 }
 
+# printf pads by bytes; pad display columns by characters (agent names hold ·/…)
+pad_cols() { # <string> <width>
+    local n=$(( $2 - ${#1} ))
+    if [ "$n" -gt 0 ]; then printf '%s%*s' "$1" "$n" ''; else printf '%s' "$1"; fi
+}
+
 JSON_DATA=$("$HERDR" agent list 2>/dev/null)
 if [ -z "$JSON_DATA" ] || ! jq -e '.result.agents' <<< "$JSON_DATA" >/dev/null 2>&1; then
     echo -e "${YELLOW}Error: Unable to fetch valid agent data from Herdr.${RESET}"
@@ -132,7 +138,8 @@ newest_file() {
     [ -n "$newest" ] && echo "$newest"
 }
 
-# Account registry (single discovery pass; arrays consulted per row later).
+# Account registry (single discovery pass; rows consult ACC_LABEL below, and
+# the ACC_* arrays also feed the SUBSCRIPTION LIMITS section in a later task).
 ACC_TSV=$(accounts_list)
 declare -A ACC_LABEL=() ACC_EMAIL=() ACC_PLAN=() ACC_HOME=() AGENT_HAS=()
 while IFS=$'\t' read -r a id label email plan home; do
@@ -146,20 +153,20 @@ jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-
     (.agent_session.value // "-"), (.foreground_cwd // .cwd // "-")] | map(if . == null or . == "" then "-" else . end) | @tsv' <<< "$JSON_DATA" |
 while IFS=$'\t' read -r agent status context title session cwd; do
     # Prefer the live value; what Herdr holds is only as fresh as the last report.
-    # The braces in "${agent}·…" are load-bearing: bash 5.3 in a UTF-8 locale
-    # otherwise scans $agent· as one (empty) variable name and drops the prefix.
+    # The braces in "${agent}·…" are load-bearing: bash 3.2–5.3 in a UTF-8
+    # locale otherwise scans $agent· as one (empty) variable name and drops the prefix.
     live=""
     case "$agent" in
         claude)
             live=$(claude_live_context "$session")
             id=$(accounts_resolve claude "$session")
-            [ -n "$id" ] && [ -n "${ACC_LABEL[claude/$id]:-}" ] &&
+            [ -n "$id" ] && [ "${ACC_LABEL[claude/$id]:-}" != default ] && [ -n "${ACC_LABEL[claude/$id]:-}" ] &&
                 agent="${agent}·${ACC_LABEL[claude/$id]}"
             ;;
         codex)
             live=$(codex_live_context "$cwd")
             id=$(accounts_resolve codex "$cwd")
-            [ -n "$id" ] && [ -n "${ACC_LABEL[codex/$id]:-]}" ] &&
+            [ -n "$id" ] && [ "${ACC_LABEL[codex/$id]:-}" != default ] && [ -n "${ACC_LABEL[codex/$id]:-]}" ] &&
                 agent="${agent}·${ACC_LABEL[codex/$id]}"
             ;;
     esac
@@ -168,9 +175,10 @@ while IFS=$'\t' read -r agent status context title session cwd; do
     status_c=$([ "$status" = "working" ] && echo "$GREEN" || echo "$YELLOW")
     [ ${#title} -gt 31 ] && title="${title:0:28}..."
     context_c=$([ "$context" != "-" ] && echo "$CYAN" || echo "$DIM")
-    printf "${SUBMARGIN}${BOLD}${WHITE}%-12s${RESET} | ${status_c}%-9s${RESET} | ${WHITE}%-32s${RESET} | ${context_c}%s${RESET}\n" "$agent" "$status" "$title" "$context" | format_bars
+    agent_padded=$(pad_cols "$agent" 12)
+    printf "${SUBMARGIN}${BOLD}${WHITE}%s${RESET} | ${status_c}%-9s${RESET} | ${WHITE}%-32s${RESET} | ${context_c}%s${RESET}\n" "$agent_padded" "$status" "$title" "$context" | format_bars
 done
-echo -e "${DIM}${SUBMARGIN}* Claude and Codex context is read live from their session files; Claude shows a percentage once hooks/claude-statusline.sh has run. \"-\" means no data yet.${RESET}"
+echo -e "${DIM}${SUBMARGIN}* Claude and Codex context is read live from their session files; Claude shows a percentage once hooks/claude-statusline.sh has run. \"-\" means no data yet. A bare claude/codex row is the default account (or not yet attributable); a ·label suffix names the account in use.${RESET}"
 echo ""
 
 echo -e "\n${MARGIN}${YELLOW}■ SUBSCRIPTION LIMITS ${RESET}"
