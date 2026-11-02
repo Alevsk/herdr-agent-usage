@@ -101,7 +101,7 @@ quota_refresh_async_identity() { # <account_id> <home> — background, 1h TTL
 }
 
 # ── claude usage rendering helpers ──────────────────────────────────────────
-quota_claude_local_usage() { # <home> → "7d · N req · N sessions" from stats-cache.json
+quota_claude_local_usage() { # <home> → "7d 42k req · 17 sess" from stats-cache.json
     local f="$1/stats-cache.json"
     [ -f "$f" ] || return 1
     local cutoff
@@ -111,15 +111,40 @@ quota_claude_local_usage() { # <home> → "7d · N req · N sessions" from stats
         select(($d | length) > 0) |
         ($d | map(.messageCount // 0) | add // 0) as $req |
         ($d | map(.sessionCount // 0) | add // 0) as $sess |
-        "7d · \($req) req · \($sess) sessions"
+        (if $req >= 1000 then "\(($req + 500) / 1000 | floor)k" else "\($req)" end) as $reqs |
+        "7d \($reqs) req · \($sess) sess"
     ' "$f" 2>/dev/null
 }
 
-quota_claude_cached_usage() { # <cache-file> → usage lines from `claude -p /usage`
+quota_claude_quota() { # <cache-file> → TSV "kind\tpct\treset" from `claude -p /usage`
+    # One line per window, kinds in priority order: week, sess, fable. Reset is
+    # normalized ("Nov 8 at 7am (TZ)" → "Nov 8 7am"), empty when absent.
     [ -f "$1" ] || return 1
-    {
-        grep '% used' "$1" 2>/dev/null | head -n 4
-        grep -oE 'Last 7d · [0-9]+ requests? · [0-9]+ sessions?' "$1" 2>/dev/null | head -n 1 |
-            sed 's/^Last //'
-    } | awk '!seen[$0]++' | head -n 5
+    awk '
+        /Current week \(all models\):/ { kind = "week" }
+        /^Current session:/            { kind = "sess" }
+        /Current week \(Fable\):/      { kind = "fable" }
+        {
+            if (kind == "") next
+            pct = ""
+            if (match($0, /[0-9]+% used/)) {
+                pct = substr($0, RSTART, RLENGTH)
+                sub(/% used$/, "", pct)
+            }
+            reset = ""
+            if (match($0, /resets [^·]*/)) {
+                reset = substr($0, RSTART + 7, RLENGTH - 7)
+                gsub(/ \(.*\)/, "", reset)
+                gsub(/ at /, " ", reset)
+                sub(/[ \t]+$/, "", reset)
+            }
+            out[kind] = pct "\t" reset
+            kind = ""
+        }
+        END {
+            if ("week"  in out) print "week\t"  out["week"]
+            if ("sess"  in out) print "sess\t"  out["sess"]
+            if ("fable" in out) print "fable\t" out["fable"]
+        }
+    ' "$1"
 }
