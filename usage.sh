@@ -25,9 +25,10 @@ source "$PLUGIN_DIR/lib/quota.sh"
 
 format_bars() {
     awk '{
-      # only table rows (" | " separators) get bars; detail/footnote lines pass
-      # through untouched even when they carry N%
-      if ($0 ~ / \| / && $0 !~ /█/) {
+      # only table rows (" | " separators) get bars; lines that already carry a
+      # composed bar_pct cell ([█… / [░…) and pipe-free detail/footnote lines
+      # pass through untouched even when they carry N%
+      if ($0 ~ / \| / && $0 !~ /\[[█░]/) {
         match($0, /[0-9]+%/)
         if (RSTART > 0) {
           pct_str = substr($0, RSTART, RLENGTH)
@@ -50,10 +51,32 @@ format_bars() {
     }'
 }
 
+# Visible display width of a string: characters, with ANSI SGR color codes
+# stripped first (bar_pct cells carry them).
+visible_len() { # <string>
+    local s=$1
+    [[ $s == *$'\033'* ]] && s=$(printf '%s' "$s" | sed $'s/\x1b\\[[0-9;]*m//g')
+    printf '%s' "${#s}"
+}
+
 # printf pads by bytes; pad display columns by characters (agent names hold ·/…)
 pad_cols() { # <string> <width>
-    local n=$(( $2 - ${#1} ))
+    local n=$(( $2 - $(visible_len "$1") ))
     if [ "$n" -gt 0 ]; then printf '%s%*s' "$1" "$n" ''; else printf '%s' "$1"; fi
+}
+
+# Colored bar for a known percentage — deterministic width, so cells that
+# contain it can be padded correctly BEFORE printing (format_bars skips
+# lines that already contain █).
+bar_pct() { # <pct 0-100>
+    # NB: the filled arithmetic needs its own local line — a single `local
+    # pct=$1 w=14 filled=$(( pct * w / 100 ))` expands before pct/w exist.
+    local pct=$1 w=14 bar="" i
+    local filled=$(( pct * w / 100 ))
+    for (( i = 0; i < w; i++ )); do
+        if [ "$i" -lt "$filled" ]; then bar+="█"; else bar+="░"; fi
+    done
+    printf '\033[1;32m[%s]\033[0m \033[1;36m%d%%\033[0m' "$bar" "$pct"
 }
 
 truncate_cell() { # <text> <width>
@@ -407,7 +430,7 @@ claude_local_summary() { # <cache-file> <home>
 render_group() { # <agent> <ids> — label line, primary rows, detail lines
     local agent=$1 ids=$2
     local first_id; first_id=$(head -n 1 <<< "$ids")
-    local id key plan cell cache usage reset epoch items lusage identity
+    local id key plan cell cache usage reset epoch items lusage identity pct tag
     local week_pct week_reset sess_pct fable_pct
 
     case "$agent" in
@@ -438,7 +461,7 @@ render_group() { # <agent> <ids> — label line, primary rows, detail lines
                     esac
                 done <<< "$(quota_claude_quota "$cache")"
                 if [ -n "$week_pct" ]; then
-                    usage="$week_pct% wk"
+                    usage="$(bar_pct "$week_pct") wk"
                     [ -n "$week_reset" ] && reset=$week_reset
                 fi
                 [ -n "$sess_pct" ] && items="sess ${sess_pct}%"
@@ -466,9 +489,9 @@ render_group() { # <agent> <ids> — label line, primary rows, detail lines
                 ' "$cache" | while IFS=$'\t' read -r model wpct wreset fpct; do
                     usage="—" reset="—" items=""
                     if [ -n "$wpct" ] && [ "$wpct" != "disabled" ]; then
-                        usage="$wpct wk"
+                        usage="$(bar_pct "${wpct%\%}") wk"
                         epoch=$(iso_to_epoch "$wreset")
-                        [ -n "$epoch" ] && reset=$(format_epoch "$epoch")
+                        [ -n "$epoch" ] && reset=$(format_epoch "$epoch" | sed 's/AM$/am/; s/PM$/pm/')
                     fi
                     if [ "$fpct" = "disabled" ]; then items="5h disabled"
                     elif [ -n "$fpct" ]; then items="5h $fpct"
@@ -480,16 +503,18 @@ render_group() { # <agent> <ids> — label line, primary rows, detail lines
             codex)
                 identity=$(agent_identity "$key")
                 cell=$(pad_cols "$(truncate_cell "${agent}${identity:+ · $identity}" 28)" 28)
-                usage=$(herdr_limit_usage "${HERDR_LIMITS[codex]:-}")
-                emit_row "$cell" 28 "$plan" "${usage:-—}" "—"
+                read -r pct tag <<< "$(herdr_limit_usage "${HERDR_LIMITS[codex]:-}")"
+                [ -n "$pct" ] && usage="$(bar_pct "${pct%\%}") $tag"
+                emit_row "$cell" 28 "$plan" "$usage" "—"
                 ;;
             grok)
                 cell=$(account_cell "${ACC_LABEL[$key]}" "${ACC_EMAIL[$key]}" 26)
                 # Herdr's limit is account-blind; attach it to the first account
                 if [ "$id" = "$first_id" ]; then
-                    usage=$(herdr_limit_usage "${HERDR_LIMITS[grok]:-}")
+                    read -r pct tag <<< "$(herdr_limit_usage "${HERDR_LIMITS[grok]:-}")"
+                    [ -n "$pct" ] && usage="$(bar_pct "${pct%\%}") $tag"
                 fi
-                emit_row "$cell" 26 "$plan" "${usage:-—}" "—"
+                emit_row "$cell" 26 "$plan" "$usage" "—"
                 ;;
             opencode)
                 identity=$(agent_identity "$key")
@@ -510,13 +535,13 @@ render_group() { # <agent> <ids> — label line, primary rows, detail lines
                     ' "$cache" 2>/dev/null)
                     [ -n "$reset7" ] && epoch7=$(iso_to_epoch "$reset7")
                     if [ -n "$pct7" ]; then
-                        usage="$pct7 wk"
                         # the cache outlives an expired token: a window that
                         # already reset is back to 0%
                         if [ -n "$epoch7" ] && [ "$epoch7" -lt "$CURRENT_TIME" ]; then
-                            usage="0% wk"; epoch7=""
+                            pct7="0%"; epoch7=""
                         fi
-                        [ -n "$epoch7" ] && reset=$(format_epoch "$epoch7")
+                        usage="$(bar_pct "${pct7%\%}") wk"
+                        [ -n "$epoch7" ] && reset=$(format_epoch "$epoch7" | sed 's/AM$/am/; s/PM$/pm/')
                     fi
                     [ -n "$pct5" ] && items="5h $pct5"
                     [ -n "$pctm" ] && items="${items:+$items · }month $pctm"
