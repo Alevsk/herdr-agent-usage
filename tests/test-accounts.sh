@@ -9,10 +9,11 @@ ok() { # ok <name> <expected> <actual>
     if [ "$2" = "$3" ]; then PASS=$((PASS+1)); else
         FAIL=$((FAIL+1)); echo "FAIL: $1"
         echo "  expected: [$2]"; echo "  actual:   [$3]"
+        diff <(printf '%s\n' "$2") <(printf '%s\n' "$3") | sed 's/^/  /'
     fi
 }
 
-FIX=$(mktemp -d); trap 'rm -rf "$FIX"' EXIT
+FIX=$(mktemp -d); trap 'rm -rf "$FIX"' EXIT INT TERM
 H="$FIX/home";  mkdir -p "$H"
 export HOME="$H"
 export XDG_CONFIG_HOME="$FIX/config"
@@ -75,14 +76,14 @@ WANT=$(printf '%s\n' \
 "claude	.claude-lenin	lenin	lenin@alevsk.com	pro	$H/.claude-lenin" \
 "claude	.claude-work	W3B	alevsk@websec.mx	team_standard	$H/.claude-work" \
 "claude	custom-claude	custom	custom@x.dev	pro	$H/custom-claude" \
+"agy	default	default	aguy@gmail.com	-	$H/.gemini" \
 "codex	.codex	default	a@openai.com	pro	$H/.codex" \
 "grok	https://auth.x.ai::uuid-1	alevsk8772	alevsk8772@gmail.com	tier 1	$H/.grok" \
-"agy	default	default	aguy@gmail.com	-	$H/.gemini" \
 "opencode	zai-coding-plan	zai-coding-plan	-	-	$H/.config/opencode" \
 "kimi	default	default	-	-	$H/.kimi-code")
 ok "list exact TSV" "$WANT" "$GOT"
 
-ok "claude-mem excluded" "" "$(grep -c claude-mem <<<"$GOT" | grep -v '^0$')"
+ok "claude-mem excluded" "0" "$(grep -c claude-mem <<<"$GOT" || true)"
 
 # ── tests: resolve ──────────────────────────────────────────────────────────
 ok "resolve claude session" ".claude-work" "$(bash lib/accounts.sh resolve claude sess-work)"

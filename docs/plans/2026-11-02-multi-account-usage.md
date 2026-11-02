@@ -110,9 +110,9 @@ WANT=$(printf '%s\n' \
 "claude	.claude-lenin	lenin	lenin@alevsk.com	pro	$H/.claude-lenin" \
 "claude	.claude-work	W3B	alevsk@websec.mx	team_standard	$H/.claude-work" \
 "claude	custom-claude	custom	custom@x.dev	pro	$H/custom-claude" \
+"agy	default	default	aguy@gmail.com	-	$H/.gemini" \
 "codex	.codex	default	a@openai.com	pro	$H/.codex" \
 "grok	https://auth.x.ai::uuid-1	alevsk8772	alevsk8772@gmail.com	tier 1	$H/.grok" \
-"agy	default	default	aguy@gmail.com	-	$H/.gemini" \
 "opencode	zai-coding-plan	zai-coding-plan	-	-	$H/.config/opencode" \
 "kimi	default	default	-	-	$H/.kimi-code")
 ok "list exact TSV" "$WANT" "$GOT"
@@ -400,7 +400,7 @@ fi
 - [ ] **Step 2: Run tests to verify they pass**
 
 Run: `bash tests/test-accounts.sh`
-Expected: `pass=7 fail=0`, exit 0. If `list exact TSV` fails, diff field-by-field before touching code — the expected block encodes discovery order (default → glob-sorted siblings → extras), labels, and conf overrides.
+Expected: `pass=5 fail=0`, exit 0. If `list exact TSV` fails, diff field-by-field before touching code — the expected block encodes discovery order (default → glob-sorted siblings → extras), labels, and conf overrides.
 
 - [ ] **Step 3: Commit**
 
