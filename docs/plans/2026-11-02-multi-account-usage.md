@@ -577,7 +577,7 @@ quota_claude_cached_usage() { # <cache-file> → summary line from `claude -p /u
 - [ ] **Step 3: Run both test scripts**
 
 Run: `bash tests/test-quota.sh && bash tests/test-accounts.sh`
-Expected: `pass=7 fail=0` and `pass=7 fail=0`, exit 0.
+Expected: `pass=9 fail=0` and `pass=7 fail=0`, exit 0.
 
 - [ ] **Step 4: Commit**
 
@@ -902,7 +902,7 @@ git -c commit.gpgsign=false commit -m "feat: unified per-account subscription gr
 - [ ] **Step 2: Run everything**
 
 Run: `bash tests/test-accounts.sh && bash tests/test-quota.sh && printf 'q' | bash usage.sh | head -60`
-Expected: both `pass=7 fail=0`; dashboard renders groups as in Task 5.
+Expected: test-quota `pass=9 fail=0` and test-accounts `pass=5 fail=0`; dashboard renders groups as in Task 5.
 
 - [ ] **Step 3: Manual visual check** — press `prefix+u` in Herdr; confirm the layout matches the smoke output and bars align.
 

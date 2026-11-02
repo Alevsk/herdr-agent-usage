@@ -26,7 +26,7 @@ quota_store() { # <agent> <account_id> <ext> <cmd...> — run cmd, cache stdout 
     local agent=$1 id=$2 ext=$3; shift 3
     local cache; cache=$(quota_cache_path "$agent" "$id" "$ext")
     mkdir -p "$(dirname "$cache")"
-    local tmp="${cache}.tmp.$$"
+    local tmp; tmp=$(mktemp "${cache}.tmp.XXXXXX") || return 1
     if "$@" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
         mv "$tmp" "$cache"
     else
@@ -47,12 +47,16 @@ quota_fetch_kimi() {
         jq -e '.usages'
 }
 
+quota_identity_cache_path() { echo "${IDENTITY_CACHE:-${TMPDIR:-/tmp}/herdr-agent-usage/identity}/claude/$1.json"; }
+
 quota_store_claude_identity() { # <account_id> <home> — keychain-auth homes have no oauthAccount
-    local cache="${IDENTITY_CACHE:-${TMPDIR:-/tmp}/herdr-agent-usage/identity}/claude/$1.json"
+    local cache; cache=$(quota_identity_cache_path "$1")
     mkdir -p "$(dirname "$cache")"
-    local tmp="${cache}.tmp.$$" out
+    local out
     out=$(CLAUDE_CONFIG_DIR="$2" claude auth status 2>/dev/null) || return 1
     jq -e '.loggedIn == true and (.email // "") != ""' <<<"$out" >/dev/null 2>&1 || return 1
+    # mktemp only after validation, so no early return can leave a tmp file behind
+    local tmp; tmp=$(mktemp "${cache}.tmp.XXXXXX") || return 1
     jq '{email: .email, subscriptionType: (.subscriptionType // "-")}' <<<"$out" > "$tmp" &&
         mv "$tmp" "$cache" || { rm -f "$tmp"; return 1; }
 }
@@ -64,13 +68,14 @@ quota_dispatch() { # <agent> <account_id> <ext> <home>
         claude) quota_store claude "$id" "$ext" quota_fetch_claude "$home" ;;
         agy)    quota_store agy    "$id" "$ext" quota_fetch_agy ;;
         kimi)   quota_store kimi   "$id" "$ext" quota_fetch_kimi ;;
+        *)      return 1 ;;
     esac
 }
 
 quota_refresh_async() { ( quota_dispatch "$@" ) & disown; }
 
 quota_refresh_async_identity() { # <account_id> <home> — background, 1h TTL
-    local cache="${IDENTITY_CACHE:-${TMPDIR:-/tmp}/herdr-agent-usage/identity}/claude/$1.json"
+    local cache; cache=$(quota_identity_cache_path "$1")
     quota_is_fresh "$cache" "$IDENTITY_TTL" && return 0
     ( quota_store_claude_identity "$1" "$2" ) & disown
 }
@@ -81,8 +86,9 @@ quota_claude_local_usage() { # <home> → "7d · N req · N sessions" from stats
     [ -f "$f" ] || return 1
     local cutoff
     cutoff=$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d)
-    jq -r --arg cutoff "$cutoff" '
+    jq -er --arg cutoff "$cutoff" '
         [(.dailyActivity // [])[] | select(.date >= $cutoff)] as $d |
+        select(($d | length) > 0) |
         ($d | map(.messageCount // 0) | add // 0) as $req |
         ($d | map(.sessionCount // 0) | add // 0) as $sess |
         "7d · \($req) req · \($sess) sessions"

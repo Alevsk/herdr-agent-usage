@@ -18,6 +18,8 @@ source lib/quota.sh
 # cache path is namespaced per agent/id and slash-safe
 ok "cache path" "$TMPDIR/herdr-agent-usage/quota/grok/a::b.txt" \
     "$(quota_cache_path grok 'a::b')"
+ok "cache path slash-safe" "$TMPDIR/herdr-agent-usage/quota/grok/https:__auth.x.ai_uuid-1.txt" \
+    "$(quota_cache_path grok 'https://auth.x.ai/uuid-1')"
 
 # store succeeds and writes non-empty output atomically
 quota_store agy default txt bash -c 'echo ok-data'
@@ -41,6 +43,11 @@ jq -n --arg t "$today" --arg o "$old" '{dailyActivity:[
     {date:$t, messageCount:100, sessionCount:5},
     {date:$o, messageCount:999, sessionCount:9}]}' > "$HOME/stats-cache.json"
 ok "local 7d summary" "7d · 100 req · 5 sessions" "$(quota_claude_local_usage "$HOME")"
+
+# only stale entries → no output, nonzero exit (no-data, not "0 req")
+h2="$FIX/home2"; mkdir -p "$h2"
+jq -n --arg o "$old" '{dailyActivity:[{date:$o, messageCount:999, sessionCount:9}]}' > "$h2/stats-cache.json"
+ok "local 7d no data" "0" "$(quota_claude_local_usage "$h2" >/dev/null && echo 1 || echo 0)"
 
 # cached /usage text extraction
 printf 'header\nLast 7d · 32334 requests · 20 sessions\ntrailer\n' > "$FIX/q.txt"
