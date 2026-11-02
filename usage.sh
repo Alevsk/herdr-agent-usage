@@ -17,6 +17,12 @@ MARGIN="    "
 SUBMARGIN="      "
 SUBSUBMARGIN="        "
 
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/accounts.sh
+source "$PLUGIN_DIR/lib/accounts.sh"
+# shellcheck source=lib/quota.sh
+source "$PLUGIN_DIR/lib/quota.sh"
+
 format_bars() {
     awk '{
       if ($0 !~ /█/) {
@@ -84,12 +90,11 @@ short_tokens() {
 CLAUDE_STATUS_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-agent-usage/claude"
 
 claude_live_context() {
-    local session=$1 transcript tokens window=""
+    local session=$1 tokens window=""
     [ "$session" != "-" ] || return 1
-    for transcript in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$session".jsonl; do
-        [ -f "$transcript" ] && break
-    done
-    [ -f "$transcript" ] || return 1
+    local transcript
+    transcript=$(accounts_claude_transcript "$session")
+    [ -n "$transcript" ] || return 1
     tokens=$(grep -h '"type":"assistant"' "$transcript" | grep -v -e '"isSidechain":true' -e '"model":"<synthetic>"' |
         tail -n 1 | jq -r '.message.usage | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null)
     [[ "$tokens" =~ ^[0-9]+$ ]] && [ "$tokens" -gt 0 ] || return 1
@@ -105,12 +110,9 @@ claude_live_context() {
 # Codex: Herdr has no session id for it, so use the newest rollout started in
 # the pane's working directory, against the model's context window.
 codex_live_context() {
-    local cwd=$1 sessions="${CODEX_HOME:-$HOME/.codex}/sessions" rollout used window
-    [ -d "$sessions" ] && [ "$cwd" != "-" ] || return 1
-    rollout=$(find "$sessions" -type f -name 'rollout-*.jsonl' -mtime -7 -print0 2>/dev/null |
-        while IFS= read -r -d '' file; do
-            head -n 1 "$file" | grep -qF "\"cwd\":\"$cwd\"" && printf '%s\0' "$file"
-        done | newest_file) || return 1
+    local cwd=$1 rollout used window
+    rollout=$(accounts_codex_rollout "$cwd")
+    [ -n "$rollout" ] || return 1
     read -r used window < <(grep -h '"type":"token_count"' "$rollout" | grep '"info":{' | tail -n 1 |
         jq -r '.payload.info | "\(.last_token_usage.total_tokens // "") \(.model_context_window // "")"' 2>/dev/null)
     [[ "$used" =~ ^[0-9]+$ ]] || return 1
@@ -130,16 +132,38 @@ newest_file() {
     [ -n "$newest" ] && echo "$newest"
 }
 
+# Account registry (single discovery pass; arrays consulted per row later).
+ACC_TSV=$(accounts_list)
+declare -A ACC_LABEL=() ACC_EMAIL=() ACC_PLAN=() ACC_HOME=() AGENT_HAS=()
+while IFS=$'\t' read -r a id label email plan home; do
+    [ -n "$a" ] || continue
+    ACC_LABEL["$a/$id"]=$label; ACC_EMAIL["$a/$id"]=$email
+    ACC_PLAN["$a/$id"]=$plan;   ACC_HOME["$a/$id"]=$home; AGENT_HAS["$a"]=1
+done <<< "$ACC_TSV"
+
 # Empty fields become "-": read collapses consecutive tabs.
 jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task"),
     (.agent_session.value // "-"), (.foreground_cwd // .cwd // "-")] | map(if . == null or . == "" then "-" else . end) | @tsv' <<< "$JSON_DATA" |
 while IFS=$'\t' read -r agent status context title session cwd; do
     # Prefer the live value; what Herdr holds is only as fresh as the last report.
+    # The braces in "${agent}·…" are load-bearing: bash 5.3 in a UTF-8 locale
+    # otherwise scans $agent· as one (empty) variable name and drops the prefix.
     live=""
     case "$agent" in
-        claude) live=$(claude_live_context "$session") ;;
-        codex) live=$(codex_live_context "$cwd") ;;
+        claude)
+            live=$(claude_live_context "$session")
+            id=$(accounts_resolve claude "$session")
+            [ -n "$id" ] && [ -n "${ACC_LABEL[claude/$id]:-}" ] &&
+                agent="${agent}·${ACC_LABEL[claude/$id]}"
+            ;;
+        codex)
+            live=$(codex_live_context "$cwd")
+            id=$(accounts_resolve codex "$cwd")
+            [ -n "$id" ] && [ -n "${ACC_LABEL[codex/$id]:-]}" ] &&
+                agent="${agent}·${ACC_LABEL[codex/$id]}"
+            ;;
     esac
+    [ ${#agent} -gt 12 ] && agent="${agent:0:11}…"
     [ -n "$live" ] && context=$live
     status_c=$([ "$status" = "working" ] && echo "$GREEN" || echo "$YELLOW")
     [ ${#title} -gt 31 ] && title="${title:0:28}..."
