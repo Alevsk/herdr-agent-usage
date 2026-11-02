@@ -28,23 +28,27 @@ accounts_conf() {
         function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
         /^[ \t]*[#;]/ { next }
         /^[ \t]*\[/ { sec = $0; gsub(/[][ \t]/, "", sec); insec = (tolower(sec) == tolower(agent)); next }
-        insec && "=" {
+        insec && index($0, "=") {
             k = trim(substr($0, 1, index($0, "=") - 1))
             v = trim(substr($0, index($0, "=") + 1))
-            split(k, ka, ".")
-            if (ka[1] == "exclude") print "exclude\t\t" v
-            else if (ka[1] == "rename") print "rename\t" ka[2] "\t" v
-            else if (ka[1] == "extra") print "extra\t" ka[2] "\t" v
+            d = index(k, ".")                       # first dot only: rename..claude-work keys keep the id
+            act = d > 0 ? substr(k, 1, d - 1) : k
+            key = d > 0 ? substr(k, d + 1) : ""
+            if (act == "exclude") print "exclude\t\t" v
+            else if (act == "rename") print "rename\t" key "\t" v
+            else if (act == "extra") print "extra\t" key "\t" v
         }
     ' "$ACCOUNTS_CONF"
 }
 
 accounts_conf_label() { # <agent> <account_id> <label> → overridden label or nothing
+    [ -f "$ACCOUNTS_CONF" ] || return 0
     accounts_conf "$1" | awk -F'\t' -v id="$2" -v label="$3" '
-        $1 == "rename" && ($2 == id || $2 == label) { print $3 }'
+        $1 == "rename" && ($2 == id || $2 == label) { print $3; exit }'
 }
 
 accounts_conf_excluded() { # <agent> <account_id> → "1" if excluded
+    [ -f "$ACCOUNTS_CONF" ] || return 0
     accounts_conf "$1" | awk -F'\t' -v id="$2" '$1 == "exclude" {
         n = split($3, ids, /[ \t]*,[ \t]*/)
         for (i = 1; i <= n; i++) if (ids[i] == id) { print "1"; exit }
@@ -52,11 +56,13 @@ accounts_conf_excluded() { # <agent> <account_id> → "1" if excluded
 }
 
 accounts_conf_extras() { # <agent> → extra home paths, one per line (~ expanded)
+    [ -f "$ACCOUNTS_CONF" ] || return 0
     accounts_conf "$1" | awk -F'\t' '$1 == "extra" { print $3 }' |
         while IFS= read -r p; do echo "${p/#\~/$HOME}"; done
 }
 
 accounts_extra_label() { # <agent> <home> → conf key naming this extra home, or nothing
+    [ -f "$ACCOUNTS_CONF" ] || return 0
     accounts_conf "$1" | awk -F'\t' -v home="$2" -v h="$HOME" '
         $1 == "extra" {
             p = $3; sub(/^~/, h, p); sub(/\/+$/, "", p)
@@ -71,8 +77,8 @@ accounts_dir_label() { # <agent> <home-basename> → "default" or dir suffix
 
 accounts_email_label() { echo "${1%%@*}"; }
 
-# emit_account <agent> <account_id> <label> <email> <plan> <home>
-emit_account() {
+# accounts_emit <agent> <account_id> <label> <email> <plan> <home>
+accounts_emit() {
     local agent=$1 id=$2 label=$3 over
     [ -n "$(accounts_conf_excluded "$agent" "$id")" ] && return 0
     over=$(accounts_conf_label "$agent" "$id" "$label")
@@ -93,8 +99,9 @@ accounts_jwt_payload() { # <jwt> → decoded payload JSON
 # ── candidate homes (env override, default base, sibling glob, conf extras) ─
 accounts_candidate_homes() { # <agent> <env_var> → one home path per line, deduped
     local agent=$1 env_var=$2 dir
+    local val="${!env_var:-}"     # safe under set -u even when the env var is unset
     local -a seen=()
-    for dir in "${!env_var}" "$HOME/.$agent" "$HOME/.$agent"-*; do
+    for dir in "$val" "$HOME/.$agent" "$HOME/.$agent"-*; do
         [ -n "${dir:-}" ] && [ -d "$dir" ] || continue
         local dup=0 s
         for s in "${seen[@]:-}"; do [ "$s" = "$dir" ] && dup=1 && break; done
@@ -106,7 +113,7 @@ accounts_candidate_homes() { # <agent> <env_var> → one home path per line, ded
         for s in "${seen[@]:-}"; do [ "$s" = "$dir" ] && dup=1 && break; done
         [ "$dup" -eq 0 ] && seen+=("$dir")
     done < <(accounts_conf_extras "$agent")
-    printf '%s\n' "${seen[@]:-}"
+    (( ${#seen[@]} )) && printf '%s\n' "${seen[@]}"
 }
 
 # ── per-agent listers ───────────────────────────────────────────────────────
@@ -139,7 +146,7 @@ accounts_list_claude() {
             plan=$(jq -r '.subscriptionType // "-"' "$IDENTITY_CACHE/claude/$b.json" 2>/dev/null)
         fi
         label=$(accounts_extra_label claude "$dir"); [ -n "$label" ] || label=$(accounts_dir_label claude "$b")
-        emit_account claude "$b" "$label" "$email" "$plan" "$dir"
+        accounts_emit claude "$b" "$label" "$email" "$plan" "$dir"
     done
 }
 
@@ -152,9 +159,11 @@ accounts_list_codex() {
         IFS=$'\t' read -r email plan < <(jq -r '
             [.email // "-", (."https://api.openai.com/auth".chatgpt_plan_type // "-")] | @tsv
         ' <<<"$payload" 2>/dev/null)
+        [ -n "$email" ] || email="-"   # payload not JSON → "-" fields, never empty
+        [ -n "$plan" ] || plan="-"
         dir=$(dirname "$file"); b=$(basename "$dir")
         label=$(accounts_extra_label codex "$dir"); [ -n "$label" ] || label=$(accounts_dir_label codex "$b")
-        emit_account codex "$b" "$label" "$email" "$plan" "$dir"
+        accounts_emit codex "$b" "$label" "$email" "$plan" "$dir"
     done < <(accounts_candidate_homes codex CODEX_HOME |
         while IFS= read -r d; do
             [ -f "$d/auth.json" ] || continue
@@ -167,7 +176,7 @@ accounts_list_grok() {
     [ -f "$f" ] || return 0
     while IFS=$'\t' read -r key email tier; do
         [ -n "$email" ] || continue
-        emit_account grok "$key" "$(accounts_email_label "$email")" "$email" \
+        accounts_emit grok "$key" "$(accounts_email_label "$email")" "$email" \
             "$([ -n "$tier" ] && echo "tier $tier" || echo "-")" "$HOME/.grok"
     done < <(jq -r 'to_entries[] |
         [.key, (.value.email // ""), ((.value.tier // "") | tostring)] | @tsv' "$f" 2>/dev/null)
@@ -178,20 +187,20 @@ accounts_list_agy() {
     [ -f "$f" ] || return 0
     email=$(jq -r '.active // empty' "$f" 2>/dev/null)
     [ -n "$email" ] || return 0
-    emit_account agy default default "$email" "-" "$HOME/.gemini"
+    accounts_emit agy default default "$email" "-" "$HOME/.gemini"
 }
 
 accounts_list_opencode() {
     local f="$HOME/.local/share/opencode/auth.json" key
     [ -f "$f" ] || return 0
     while IFS= read -r key; do
-        emit_account opencode "$key" "$key" "-" "-" "$HOME/.config/opencode"
+        accounts_emit opencode "$key" "$key" "-" "-" "$HOME/.config/opencode"
     done < <(jq -r 'to_entries[] | select(.key != null) | .key' "$f" 2>/dev/null)
 }
 
 accounts_list_kimi() {
     [ -d "$HOME/.kimi-code/credentials" ] || return 0
-    emit_account kimi default default "-" "-" "$HOME/.kimi-code"
+    accounts_emit kimi default default "-" "-" "$HOME/.kimi-code"
 }
 
 accounts_list() {

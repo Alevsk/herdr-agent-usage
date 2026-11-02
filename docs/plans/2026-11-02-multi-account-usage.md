@@ -97,6 +97,7 @@ mkdir -p "$XDG_CONFIG_HOME/herdr-agent-usage"
 cat > "$XDG_CONFIG_HOME/herdr-agent-usage/accounts.conf" <<EOF
 [claude]
 rename.work = W3B
+rename..claude-lenin = Lenin
 extra.custom = $H/custom-claude
 
 [grok]
@@ -107,7 +108,7 @@ EOF
 GOT=$(bash lib/accounts.sh list)
 WANT=$(printf '%s\n' \
 "claude	.claude	default	alevsk.8772@gmail.com	max5	$H/.claude" \
-"claude	.claude-lenin	lenin	lenin@alevsk.com	pro	$H/.claude-lenin" \
+"claude	.claude-lenin	Lenin	lenin@alevsk.com	pro	$H/.claude-lenin" \
 "claude	.claude-work	W3B	alevsk@websec.mx	team_standard	$H/.claude-work" \
 "claude	custom-claude	custom	custom@x.dev	pro	$H/custom-claude" \
 "agy	default	default	aguy@gmail.com	-	$H/.gemini" \
