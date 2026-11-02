@@ -1,0 +1,28 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match herdr-plugin.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' herdr-plugin.toml | head -n1)
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match herdr-plugin.toml version $manifest_version" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
