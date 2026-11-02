@@ -121,6 +121,5 @@ quota_claude_cached_usage() { # <cache-file> → usage lines from `claude -p /us
         grep '% used' "$1" 2>/dev/null | head -n 4
         grep -oE 'Last 7d · [0-9]+ requests? · [0-9]+ sessions?' "$1" 2>/dev/null | head -n 1 |
             sed 's/^Last //'
-        grep -E '[0-9]+%' "$1" 2>/dev/null
-    } | awk '!seen[$0]++' | head -n 6
+    } | awk '!seen[$0]++' | head -n 5
 }
