@@ -2,7 +2,7 @@
 
 Date: 2026-11-02
 Plugin: `alevsk.agent-usage` (herdr-agent-usage)
-Status: Approved
+Status: Implemented
 
 ## Problem
 

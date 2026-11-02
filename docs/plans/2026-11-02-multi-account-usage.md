@@ -577,7 +577,7 @@ quota_claude_cached_usage() { # <cache-file> → summary line from `claude -p /u
 - [ ] **Step 3: Run both test scripts**
 
 Run: `bash tests/test-quota.sh && bash tests/test-accounts.sh`
-Expected: `pass=11 fail=0` and `pass=7 fail=0`, exit 0.
+Expected: `pass=11 fail=0` and `pass=5 fail=0`, exit 0.
 
 - [ ] **Step 4: Commit**
 
