@@ -36,7 +36,7 @@ quota_store() { # <agent> <account_id> <ext> <cmd...> — run cmd, cache stdout 
 
 # ── fetchers (stdout only; no credentials on command lines) ────────────────
 quota_fetch_claude() { CLAUDE_CONFIG_DIR="$1" claude -p "/usage"; }
-quota_fetch_agy()    { agy -p "/usage"; }
+quota_fetch_agy()    { agy -p "/usage" | awk -F'\t' 'NF >= 3 && $1 != "Quota:"'; }
 quota_fetch_kimi() {
     local token
     token=$(jq -rs 'map(select((.expires_at // 0) > now)) | max_by(.expires_at) | .access_token // empty' \

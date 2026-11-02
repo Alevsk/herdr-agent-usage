@@ -53,5 +53,17 @@ ok "local 7d no data" "0" "$(quota_claude_local_usage "$h2" >/dev/null && echo 1
 printf 'header\nLast 7d · 32334 requests · 20 sessions\ntrailer\n' > "$FIX/q.txt"
 ok "cached usage line" "7d · 32334 requests · 20 sessions" "$(quota_claude_cached_usage "$FIX/q.txt")"
 
+# agy fetch filters malformed rows (shape check before caching)
+mkdir -p "$FIX/bin"
+printf '#!/usr/bin/env bash\necho -e "Quota:\\theader\\nGemini Models\\tWeekly\\t100%%\\t2026-11-09T17:22:24Z\\ntruncated-row\\t%%"\n' > "$FIX/bin/agy"
+chmod +x "$FIX/bin/agy"
+export PATH="$FIX/bin:$PATH"
+ok "agy fetch filters malformed rows" "Gemini Models	Weekly	100%	2026-11-09T17:22:24Z" "$(quota_fetch_agy)"
+
+# all-malformed output yields nothing → no cache file is written
+printf '#!/usr/bin/env bash\necho "Quota:\\tonly"\n' > "$FIX/bin/agy"
+quota_store agy shape txt quota_fetch_agy 2>/dev/null
+ok "agy malformed not cached" "" "$(cat "$(quota_cache_path agy shape txt)" 2>/dev/null)"
+
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

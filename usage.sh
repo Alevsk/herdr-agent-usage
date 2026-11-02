@@ -54,6 +54,39 @@ pad_cols() { # <string> <width>
     if [ "$n" -gt 0 ]; then printf '%s%*s' "$1" "$n" ''; else printf '%s' "$1"; fi
 }
 
+truncate_cell() { # <text> <width>
+    [ ${#1} -gt "$2" ] && echo "${1:0:$(( $2 - 1 ))}…" || echo "$1"
+}
+
+render_account_cell() { # <label> <email> → "label · email" truncated to 28
+    local cell="$1"
+    [ "$2" != "-" ] && [ -n "$2" ] && cell="$1 · $2"
+    truncate_cell "$cell" 28
+}
+
+render_agy_account() { # <account_id> <account_cell> — agy TSV rows, single usage column
+    local cache; cache=$(quota_cache_path agy "$1")
+    [ -f "$cache" ] || { printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$2" 28)" "$(pad_cols "-" 13)" "-"; return; }
+    local first=1 model limit pct reset reset_seg
+    grep -v "Quota:" "$cache" | while IFS=$'\t' read -r model limit pct reset; do
+        reset_seg=""
+        if [ -n "$reset" ] && [ "$pct" != "disabled" ]; then
+            if [ "$IS_GNU_DATE" = 1 ]; then
+                reset_seg=$(date -d "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
+            else
+                reset_seg=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
+            fi
+            reset_seg=" · ${reset_seg:-$reset}"
+        fi
+        if [ "$first" -eq 1 ]; then
+            printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$2" 28)" "$(pad_cols "-" 13)" "$model · $limit · $pct$reset_seg"
+            first=0
+        else
+            printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "" 28)" "$(pad_cols "" 13)" "$model · $limit · $pct$reset_seg"
+        fi
+    done
+}
+
 JSON_DATA=$("$HERDR" agent list 2>/dev/null)
 if [ -z "$JSON_DATA" ] || ! jq -e '.result.agents' <<< "$JSON_DATA" >/dev/null 2>&1; then
     echo -e "${YELLOW}Error: Unable to fetch valid agent data from Herdr.${RESET}"
@@ -184,9 +217,10 @@ echo ""
 echo -e "\n${MARGIN}${YELLOW}■ SUBSCRIPTION LIMITS ${RESET}"
 
 CURRENT_TIME=$(date +%s)
+IS_GNU_DATE=$(date --version >/dev/null 2>&1 && echo 1 || echo 0)
 
 format_epoch() {
-    if date --version >/dev/null 2>&1; then
+    if [ "$IS_GNU_DATE" = 1 ]; then
         date -d "@$1" "+%b %d at %-I:%M%p"
     else
         date -r "$1" "+%b %d at %-I:%M%p"
@@ -196,7 +230,7 @@ format_epoch() {
 # Converts an ISO-8601 UTC timestamp (fractional seconds allowed) to epoch
 # seconds. BSD date -j -f parses in local time, so it runs under TZ=UTC.
 iso_to_epoch() {
-    if date --version >/dev/null 2>&1; then
+    if [ "$IS_GNU_DATE" = 1 ]; then
         date -d "$1" +%s 2>/dev/null
     else
         local clean=${1%Z}
@@ -280,7 +314,7 @@ for agent in codex kimi; do
     [ -z "${AGENT_HAS[$agent]:-}" ] || continue
     [ -n "${HERDR_LIMITS[$agent]:-}" ] && continue
     case "$agent" in
-        codex) IFS=$'\t' read -r provider limit < <(codex_local_limit "${ACC_HOME[codex/.codex]:-$HOME/.codex}") || continue ;;
+        codex) IFS=$'\t' read -r provider limit < <(codex_local_limit "$HOME/.codex") || continue ;;
         kimi)  IFS=$'\t' read -r provider limit < <(kimi_local_limit) || continue ;;
     esac
     HERDR_LIMITS["$agent"]="$limit"
@@ -335,42 +369,13 @@ while IFS=$'\t' read -r a id label email plan home; do
 done <<< "$ACC_TSV"
 
 # ── unified per-agent groups ────────────────────────────────────────────────
-truncate_cell() { # <text> <width>
-    [ ${#1} -gt "$2" ] && echo "${1:0:$(( $2 - 1 ))}…" || echo "$1"
-}
-
-render_account_cell() { # <label> <email> → "label · email" truncated to 28
-    local cell="$1"
-    [ "$2" != "-" ] && [ -n "$2" ] && cell="$1 · $2"
-    truncate_cell "$cell" 28
-}
-
-render_agy_account() { # <account_id> <account_cell> — agy TSV rows, single usage column
-    local cache; cache=$(quota_cache_path agy "$1")
-    [ -f "$cache" ] || { printf "%s | %s | %s\n" "$(pad_cols "$2" 28)" "$(pad_cols "-" 13)" "-"; return; }
-    local first=1 model limit pct reset reset_local
-    grep -v "Quota:" "$cache" | while IFS=$'\t' read -r model limit pct reset; do
-        if date --version >/dev/null 2>&1; then
-            reset_local=$(date -d "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
-        else
-            reset_local=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$reset" "+%b %d at %-I:%M%p (%Z)" 2>/dev/null)
-        fi
-        reset_local=${reset_local:-$reset}
-        if [ "$first" -eq 1 ]; then
-            printf "%s | %s | %s\n" "$(pad_cols "$2" 28)" "$(pad_cols "-" 13)" "$model · $limit · $pct · $reset_local"
-            first=0
-        else
-            printf "%s | %s | %s\n" "$(pad_cols "" 28)" "$(pad_cols "" 13)" "$model · $limit · $pct · $reset_local"
-        fi
-    done
-}
-
 GROUP_ORDER=(claude agy codex grok opencode kimi)
 for agent in "${GROUP_ORDER[@]}"; do
     ids=$(awk -F'\t' -v a="$agent" '$1 == a { print $2 }' <<< "$ACC_TSV")
     [ -n "$ids" ] || continue
     echo -e "${SUBMARGIN}${CYAN}[$agent]${RESET}"
     printf "${DIM}${SUBSUBMARGIN}%-28s | %-13s | %s${RESET}\n" "ACCOUNT" "PLAN" "USAGE & LIMITS"
+    grok_first_id=$(awk -F'\t' -v a=grok '$1==a{print $2; exit}' <<< "$ACC_TSV")
     while IFS= read -r id; do
         local_key="$agent/$id"
         cell=$(render_account_cell "${ACC_LABEL[$local_key]}" "${ACC_EMAIL[$local_key]}")
@@ -384,9 +389,11 @@ for agent in "${GROUP_ORDER[@]}"; do
                 printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "$usage"
                 ;;
             agy)
-                render_agy_account "$id" "$cell" | sed "s/^/$SUBSUBMARGIN/"
+                render_agy_account "$id" "$cell"
                 ;;
             codex)
+                # Herdr's per-pane limit is account-blind, so it attaches only to
+                # the default home; custom homes read their own rollouts.
                 if [ -n "${HERDR_LIMITS[codex]:-}" ] && [ "$id" = ".codex" ]; then
                     usage="${HERDR_LIMITS[codex]}"
                 else
@@ -395,7 +402,7 @@ for agent in "${GROUP_ORDER[@]}"; do
                 printf "${SUBSUBMARGIN}%s | %s | %s\n" "$(pad_cols "$cell" 28)" "$(pad_cols "$plan" 13)" "${usage:--}"
                 ;;
             grok)
-                if [ -n "${HERDR_LIMITS[grok]:-}" ] && [ "$id" = "$(awk -F'\t' -v a=grok '$1==a{print $2; exit}' <<< "$ACC_TSV")" ]; then
+                if [ -n "${HERDR_LIMITS[grok]:-}" ] && [ "$id" = "$grok_first_id" ]; then
                     usage="${HERDR_LIMITS[grok]}"
                 else
                     usage="-"
