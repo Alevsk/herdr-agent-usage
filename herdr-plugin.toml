@@ -1,6 +1,6 @@
 id = "alevsk.agent-usage"
 name = "Agent Usage Dashboard"
-version = "0.6.0"
+version = "0.6.1"
 min_herdr_version = "0.7.0"
 description = "Unified HUD of live agent context and per-account subscription quotas"
 platforms = ["linux", "macos", "windows"]
