@@ -3,107 +3,39 @@
 HERDR="${HERDR_BIN_PATH:-herdr}"
 if ! command -v jq >/dev/null; then exit 1; fi
 
-CYAN='\033[1;36m'
-GREEN='\033[1;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[1;34m'
-MAGENTA='\033[1;35m'
-WHITE='\033[1;37m'
-DIM='\033[2m'
-BOLD='\033[1m'
-RESET='\033[0m'
+BLUE=$'\033[1;34m'
+MAGENTA=$'\033[1;35m'
 
 MARGIN="    "
 SUBMARGIN="      "
-SUBSUBMARGIN="        "
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/table.sh
+source "$PLUGIN_DIR/lib/table.sh"
 # shellcheck source=lib/accounts.sh
 source "$PLUGIN_DIR/lib/accounts.sh"
 # shellcheck source=lib/quota.sh
 source "$PLUGIN_DIR/lib/quota.sh"
 
-format_bars() {
-    awk '{
-      # only table rows (" | " separators) get bars; lines that already carry a
-      # composed bar_pct cell ([█… / [░…) and pipe-free detail/footnote lines
-      # pass through untouched even when they carry N%
-      if ($0 ~ / \| / && $0 !~ /\[[█░]/) {
-        match($0, /[0-9]+%/)
-        if (RSTART > 0) {
-          pct_str = substr($0, RSTART, RLENGTH)
-          pct = pct_str + 0
-          width = 14
-          filled = int((pct * width) / 100)
-          empty = width - filled
-          
-          c_bar = "\033[1;32m["
-          for(i=0; i<filled; i++) c_bar = c_bar "█"
-          c_bar = c_bar "\033[2m"
-          for(i=0; i<empty; i++) c_bar = c_bar "░"
-          c_bar = c_bar "\033[1;32m]\033[0m"
-          
-          replacement = c_bar " \033[1;36m" pct_str "\033[0m"
-          sub(/[0-9]+%/, replacement, $0)
-        }
-      }
-      print $0
-    }'
+# Outer width of the grids: the pane, minus the indent, capped so a wide
+# terminal does not stretch every column.
+term_budget() {
+    local cols=${COLUMNS:-}
+    if [ -z "$cols" ]; then
+        cols=$(stty size 2>/dev/null | awk '{print $2}')
+    fi
+    [[ $cols =~ ^[0-9]+$ ]] && [ "$cols" -gt 0 ] || cols=100
+    local budget=$(( cols - ${#SUBMARGIN} ))
+    [ "$budget" -gt 140 ] && budget=140
+    [ "$budget" -lt 48 ] && budget=48
+    printf '%s' "$budget"
 }
 
-# Visible display width of a string: characters, with ANSI SGR color codes
-# stripped first (bar_pct cells carry them).
-visible_len() { # <string>
-    local s=$1
-    [[ $s == *$'\033'* ]] && s=$(printf '%s' "$s" | sed $'s/\x1b\\[[0-9;]*m//g')
-    printf '%s' "${#s}"
-}
-
-# printf pads by bytes; pad display columns by characters (agent names hold ·/…)
-pad_cols() { # <string> <width>
-    local n=$(( $2 - $(visible_len "$1") ))
-    if [ "$n" -gt 0 ]; then printf '%s%*s' "$1" "$n" ''; else printf '%s' "$1"; fi
-}
-
-# Colored bar for a known percentage — deterministic width, so cells that
-# contain it can be padded correctly BEFORE printing (format_bars skips
-# lines that already contain █).
-bar_pct() { # <pct 0-100>
-    # NB: the filled arithmetic needs its own local line — a single `local
-    # pct=$1 w=14 filled=$(( pct * w / 100 ))` expands before pct/w exist.
-    local pct=$1 w=14 bar="" i
-    local filled=$(( pct * w / 100 ))
-    for (( i = 0; i < w; i++ )); do
-        if [ "$i" -lt "$filled" ]; then bar+="█"; else bar+="░"; fi
+print_indented() { # <indent> — prefix each stdin line
+    local indent=$1 line
+    while IFS= read -r line || [ -n "$line" ]; do
+        printf '%s%s\n' "$indent" "$line"
     done
-    printf '\033[1;32m[%s]\033[0m \033[1;36m%d%%\033[0m' "$bar" "$pct"
-}
-
-truncate_cell() { # <text> <width>
-    [ ${#1} -gt "$2" ] && echo "${1:0:$(( $2 - 1 ))}…" || echo "$1"
-}
-
-plan_cell() { # <plan> — strip at first underscore, "-" → em dash, pad 6
-    local p=${1%%_*}
-    { [ -z "$p" ] || [ "$p" = "-" ]; } && p="—"
-    pad_cols "$p" 6
-}
-
-# group-label identity: the email, else a non-default label (opencode's
-# provider key) — empty when the account has neither
-agent_identity() { # <agent>/<account_id>
-    local email="${ACC_EMAIL[$1]:-}" label="${ACC_LABEL[$1]:-}"
-    if [ -n "$email" ] && [ "$email" != "-" ]; then echo "$email"
-    elif [ -n "$label" ] && [ "$label" != "default" ]; then echo "$label"
-    fi
-}
-
-account_cell() { # <label> <email> <width> — bare email when its local part starts with the label
-    local cell=$1
-    if [ -n "$2" ] && [ "$2" != "-" ]; then
-        if [[ "${2%%@*}" == "$1"* ]]; then cell=$2; else cell="$1 · $2"; fi
-    fi
-    pad_cols "$(truncate_cell "$cell" "$3")" "$3"
 }
 
 # Herdr reports limits as "7d 18%"; rows want "18% 7d". Empty when the value
@@ -121,10 +53,10 @@ if [ -z "$JSON_DATA" ] || ! jq -e '.result.agents' <<< "$JSON_DATA" >/dev/null 2
 fi
 
 clear
+BUDGET=$(term_budget)
 echo ""
-echo -e "${MARGIN}${CYAN}╭─────────────────────────────────────────────────────────────────────────────╮${RESET}"
-echo -e "${MARGIN}${CYAN}│                       ${BOLD}Herdr Agent Usage Dashboard${RESET}${CYAN}                           │${RESET}"
-echo -e "${MARGIN}${CYAN}╰─────────────────────────────────────────────────────────────────────────────╯${RESET}\n"
+print_indented "$SUBMARGIN" <<< "$(box_banner "$BUDGET" "Herdr Agent Usage Dashboard")"
+echo ""
 
 read -r TOTAL_AGENTS WORKING_AGENTS IDLE_AGENTS <<< $(jq -r '
   (.result.agents // []) |
@@ -140,8 +72,6 @@ echo -e "${SUBMARGIN}Working:       ${GREEN}$WORKING_AGENTS${RESET}"
 echo -e "${SUBMARGIN}Idle:          ${YELLOW}$IDLE_AGENTS${RESET}\n"
 
 echo -e "${MARGIN}${BLUE}■ AGENT CONTEXT BREAKDOWN ${RESET}"
-printf "${DIM}${SUBMARGIN}%-12s | %-9s | %-32s | %s${RESET}\n" "AGENT" "STATUS" "TASK" "CONTEXT & TOKENS"
-echo -e "${DIM}${SUBMARGIN}────────────────────────────────────────────────────────────────────────────${RESET}"
 
 short_tokens() {
     if [ "$1" -ge 1000 ]; then echo "$(( ($1 + 500) / 1000 ))k"; else echo "$1"; fi
@@ -209,8 +139,7 @@ while IFS=$'\t' read -r a id label email plan home; do
 done <<< "$ACC_TSV"
 
 # Empty fields become "-": read collapses consecutive tabs.
-jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task"),
-    (.agent_session.value // "-"), (.foreground_cwd // .cwd // "-")] | map(if . == null or . == "" then "-" else . end) | @tsv' <<< "$JSON_DATA" |
+context_tsv=$'AGENT\tSTATUS\tTASK\tCONTEXT\n'
 while IFS=$'\t' read -r agent status context title session cwd; do
     # Prefer the live value; what Herdr holds is only as fresh as the last report.
     # The braces in "${agent}·…" are load-bearing: bash 3.2–5.3 in a UTF-8
@@ -226,22 +155,27 @@ while IFS=$'\t' read -r agent status context title session cwd; do
         codex)
             live=$(codex_live_context "$cwd")
             id=$(accounts_resolve codex "$cwd")
-            [ -n "$id" ] && [ "${ACC_LABEL[codex/$id]:-}" != default ] && [ -n "${ACC_LABEL[codex/$id]:-]}" ] &&
+            [ -n "$id" ] && [ "${ACC_LABEL[codex/$id]:-}" != default ] && [ -n "${ACC_LABEL[codex/$id]:-}" ] &&
                 agent="${agent}·${ACC_LABEL[codex/$id]}"
             ;;
     esac
-    [ ${#agent} -gt 12 ] && agent="${agent:0:11}…"
+    [ "$(visible_len "$agent")" -gt 22 ] && agent=$(truncate_cell "$agent" 22)
     [ -n "$live" ] && context=$live
-    status_c=$([ "$status" = "working" ] && echo "$GREEN" || echo "$YELLOW")
-    [ ${#title} -gt 31 ] && title="${title:0:28}..."
-    context_c=$([ "$context" != "-" ] && echo "$CYAN" || echo "$DIM")
-    agent_padded=$(pad_cols "$agent" 12)
-    printf "${SUBMARGIN}${BOLD}${WHITE}%s${RESET} | ${status_c}%-9s${RESET} | ${WHITE}%-32s${RESET} | ${context_c}%s${RESET}\n" "$agent_padded" "$status" "$title" "$context" | format_bars
-done
-echo -e "${DIM}${SUBMARGIN}* Claude and Codex context is read live from their session files; Claude shows a percentage once hooks/claude-statusline.sh has run. \"-\" means no data yet. A bare claude/codex row is the default account (or not yet attributable); a ·label suffix names the account in use.${RESET}"
-echo ""
+    title=${title//$'\t'/ }
+    if [ "$status" = "working" ]; then status_cell="${GREEN}${status}${RESET}"
+    else status_cell="${YELLOW}${status}${RESET}"; fi
+    context_tsv+="${BOLD}${WHITE}${agent}${RESET}"$'\t'"${status_cell}"$'\t'"${title}"$'\t'"$(context_cell "$context")"$'\n'
+done < <(jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.context // "-"), (.terminal_title_stripped // "Unknown Task"),
+    (.agent_session.value // "-"), (.foreground_cwd // .cwd // "-")] | map(if . == null or . == "" then "-" else . end) | @tsv' <<< "$JSON_DATA")
 
-echo -e "\n${MARGIN}${YELLOW}■ SUBSCRIPTION LIMITS ${RESET}"
+context_table=$(table_render "$BUDGET" 2 1 <<< "$context_tsv")
+print_indented "$SUBMARGIN" <<< "$context_table"
+note='Live for Claude and Codex. A percentage appears once hooks/claude-statusline.sh has run.
+"—" means no data. A bare claude/codex row is the default account; a ·label suffix names the account.'
+echo ""
+while IFS= read -r line; do
+    printf '%s%s%s%s\n' "$SUBMARGIN" "$DIM" "$line" "$RESET"
+done < <(printf '%s\n' "$note" | fold -s -w "$BUDGET")
 echo ""
 
 CURRENT_TIME=$(date +%s)
@@ -396,23 +330,8 @@ while IFS=$'\t' read -r a id label email plan home; do
     esac
 done <<< "$ACC_TSV"
 
-# ── unified per-agent groups ────────────────────────────────────────────────
+# ── one block per agent+account ─────────────────────────────────────────────
 GROUP_ORDER=(claude agy codex grok opencode kimi)
-
-printf "${DIM}${SUBMARGIN}%-28s | %-6s | %-24s | %s${RESET}\n" "ACCOUNT" "PLAN" "USAGE" "RESETS"
-echo -e "${DIM}${SUBMARGIN}$(printf '%.0s─' {1..70})${RESET}"
-
-emit_label() { echo -e "${SUBMARGIN}${CYAN}$1${RESET}"; }
-
-emit_row() { # <padded-cell> <cellw> <plan> <usage> <resets> — width-28 rows sit at SUBMARGIN
-    local indent=$SUBSUBMARGIN
-    [ "$2" = 28 ] && indent=$SUBMARGIN
-    printf "%s%s | %s | %s | %s\n" "$indent" "$1" "$(plan_cell "$3")" "$(pad_cols "$4" 24)" "${5:--}"
-}
-
-emit_detail() { # "item · item" — dim, no pipes, so format_bars leaves the N% bare
-    [ -n "$1" ] && echo -e "${DIM}${SUBSUBMARGIN}  · $1${RESET}"
-}
 
 # Compact 7d summary for a claude account: the /usage cache's "Last 7d" line
 # when present, else the home's stats-cache.json via quota_claude_local_usage.
@@ -427,179 +346,193 @@ claude_local_summary() { # <cache-file> <home>
     fi
 }
 
-render_group() { # <agent> <ids> — label line, primary rows, detail lines
-    local agent=$1 ids=$2
-    local first_id; first_id=$(head -n 1 <<< "$ids")
-    local id key plan cell cache usage reset epoch items lusage identity pct tag
-    local week_pct week_reset sess_pct fable_pct
+# One account block. The first window row carries agent, account, and plan;
+# the rows under it leave those cells empty until the next __RULE__.
+emit_account() { # <agent> <id> <multi 0|1> <first_id>
+    local agent=$1 id=$2 multi=$3 first_id=$4
+    local key="$agent/$id" shown=0 any=0
+    local account plan agent_cell account_cell
+    account=$(account_display "${ACC_LABEL[$key]:-}" "${ACC_EMAIL[$key]:-}" "$multi")
+    plan=$(plan_name "${ACC_PLAN[$key]:-}")
+    agent_cell="${BOLD}${WHITE}${agent}${RESET}"
+    account_cell="${CYAN}${account}${RESET}"
 
+    # shellcheck disable=SC2317
+    emit() { # <limit> <usage> <reset>
+        local reset=$3
+        { [ -n "$reset" ] && [ "$reset" != "-" ]; } || reset="—"
+        if [ "$shown" = 0 ]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$agent_cell" "$account_cell" "$plan" "$1" "$2" "$reset"
+            shown=1
+        else
+            printf '\t\t\t%s\t%s\t%s\n' "$1" "$2" "$reset"
+        fi
+        any=1
+    }
+
+    local cache pct="" tag=""
     case "$agent" in
-        claude|grok) emit_label "$agent" ;;         # multi-account: bare name
-        agy)                                           # one account, many model families
-            identity=$(agent_identity "agy/$first_id")
-            emit_label "agy${identity:+ · $identity}"
-            ;;
-        *) # single-account agents fold the label into their row; width 28 at
-           # SUBMARGIN spans the same columns as width 26 at SUBSUBMARGIN
-            ;;
-    esac
-
-    while IFS= read -r id; do
-        key="$agent/$id"
-        plan=${ACC_PLAN[$key]:-}
-        usage="—" reset="—" items=""
-        case "$agent" in
-            claude)
-                cell=$(account_cell "${ACC_LABEL[$key]}" "${ACC_EMAIL[$key]}" 26)
-                cache=$(quota_cache_path claude "$id")
-                week_pct="" week_reset="" sess_pct="" fable_pct=""
+        claude)
+            cache=$(quota_cache_path claude "$id")
+            local week_pct="" week_reset="" sess_pct="" fable_pct="" lusage=""
+            if [ -f "$cache" ]; then
                 while IFS=$'\t' read -r k p r; do
                     case "$k" in
-                        week)  week_pct=$p;  week_reset=$r ;;
+                        week)  week_pct=$p; week_reset=$r ;;
                         sess)  sess_pct=$p ;;
                         fable) fable_pct=$p ;;
                     esac
-                done <<< "$(quota_claude_quota "$cache")"
-                if [ -n "$week_pct" ]; then
-                    usage="$(bar_pct "$week_pct") wk"
-                    [ -n "$week_reset" ] && reset=$week_reset
-                fi
-                [ -n "$sess_pct" ] && items="sess ${sess_pct}%"
-                [ -n "$fable_pct" ] && items="${items:+$items · }Fable ${fable_pct}%"
-                lusage=$(claude_local_summary "$cache" "${ACC_HOME[$key]}")
-                [ -n "$lusage" ] && items="${items:+$items · }$lusage"
-                emit_row "$cell" 26 "$plan" "$usage" "$reset"
-                emit_detail "$items"
-                ;;
-            agy)
-                cache=$(quota_cache_path agy "$id")
-                if [ ! -f "$cache" ]; then
-                    emit_row "$(account_cell "${ACC_LABEL[$key]}" "${ACC_EMAIL[$key]}" 26)" 26 "$plan" "—" "—"
-                    continue
-                fi
-                # collapse the cache to one weekly row per model family,
-                # carrying its five-hour percentage alongside
-                awk -F'\t' '
-                    $1 != "Quota:" && NF >= 3 {
-                        if (!($1 in fam)) { fam[$1] = 1; order[++n] = $1 }
-                        if ($2 ~ /Weekly/ && w[$1]++ == 0) { wp[$1] = $3; wr[$1] = $4 }
-                        if ($2 ~ /Five Hour/ && f[$1]++ == 0) fp[$1] = $3
-                    }
-                    END { for (i = 1; i <= n; i++) printf "%s\t%s\t%s\t%s\n", order[i], wp[order[i]], wr[order[i]], fp[order[i]] }
-                ' "$cache" | while IFS=$'\t' read -r model wpct wreset fpct; do
-                    usage="—" reset="—" items=""
-                    if [ -n "$wpct" ] && [ "$wpct" != "disabled" ]; then
-                        usage="$(bar_pct "${wpct%\%}") wk"
-                        epoch=$(iso_to_epoch "$wreset")
-                        [ -n "$epoch" ] && reset=$(format_epoch "$epoch" | sed 's/AM$/am/; s/PM$/pm/')
+                done < <(quota_claude_quota "$cache" || true)
+            fi
+            [ -n "$week_pct" ] && emit week "$(bar_pct "$week_pct")" "$week_reset"
+            [ -n "$sess_pct" ] && emit session "$(bar_pct "$sess_pct")" ""
+            [ -n "$fable_pct" ] && emit fable "$(bar_pct "$fable_pct")" ""
+            lusage=$(claude_local_summary "$cache" "${ACC_HOME[$key]:-}" || true)
+            [ -n "$lusage" ] && emit "7d" "${lusage#7d }" ""
+            [ "$any" = 0 ] && emit "—" "—" ""
+            ;;
+        agy)
+            cache=$(quota_cache_path agy "$id")
+            if [ ! -f "$cache" ]; then emit "—" "—" ""; return; fi
+            local model wpct wreset fpct epoch reset_fmt
+            # one weekly row and one five-hour row per model family
+            while IFS=$'\t' read -r model wpct wreset fpct; do
+                [ -n "$model" ] || continue
+                model=${model//$'\t'/ }
+                if [ -n "$wpct" ]; then
+                    if [ "$wpct" = "disabled" ]; then
+                        emit "${model} · week" "${DIM}disabled${RESET}" ""
+                    else
+                        epoch=$(iso_to_epoch "$wreset" || true)
+                        reset_fmt="—"
+                        [ -n "$epoch" ] && reset_fmt=$(format_epoch "$epoch" | sed 's/AM$/am/; s/PM$/pm/')
+                        emit "${model} · week" "$(bar_pct "${wpct%\%}")" "$reset_fmt"
                     fi
-                    if [ "$fpct" = "disabled" ]; then items="5h disabled"
-                    elif [ -n "$fpct" ]; then items="5h $fpct"
-                    fi
-                    emit_row "$(pad_cols "$(truncate_cell "$model" 26)" 26)" 26 "-" "$usage" "$reset"
-                    emit_detail "$items"
-                done
-                ;;
-            codex)
-                identity=$(agent_identity "$key")
-                cell=$(pad_cols "$(truncate_cell "${agent}${identity:+ · $identity}" 28)" 28)
-                read -r pct tag <<< "$(herdr_limit_usage "${HERDR_LIMITS[codex]:-}")"
-                [ -n "$pct" ] && usage="$(bar_pct "${pct%\%}") $tag"
-                emit_row "$cell" 28 "$plan" "$usage" "—"
-                ;;
-            grok)
-                cell=$(account_cell "${ACC_LABEL[$key]}" "${ACC_EMAIL[$key]}" 26)
-                # Herdr's limit is account-blind; attach it to the first account
-                if [ "$id" = "$first_id" ]; then
-                    read -r pct tag <<< "$(herdr_limit_usage "${HERDR_LIMITS[grok]:-}")"
-                    [ -n "$pct" ] && usage="$(bar_pct "${pct%\%}") $tag"
                 fi
-                emit_row "$cell" 26 "$plan" "$usage" "—"
-                ;;
-            opencode)
-                identity=$(agent_identity "$key")
-                cell=$(pad_cols "$(truncate_cell "${agent}${identity:+ · $identity}" 28)" 28)
-                emit_row "$cell" 28 "$plan" "—" "—"
-                ;;
-            kimi)
-                identity=$(agent_identity "$key")
-                cell=$(pad_cols "$(truncate_cell "${agent}${identity:+ · $identity}" 28)" 28)
-                cache=$(quota_cache_path kimi "$id" json)
-                if [ -f "$cache" ]; then
-                    local pct7 reset7 pct5 pctm epoch7=""
-                    IFS=$'\t' read -r pct7 reset7 pct5 pctm < <(jq -r '
-                        def pct($k): (.usages[$k].used_ratio // null) as $r |
-                            if $r == null then "" else "\(($r * 100) | round)%" end;
-                        def rst($k): (.usages[$k].reset_time // "");
-                        [pct("limit_7d"), rst("limit_7d"), pct("limit_5h"), pct("limit_month_total")] | @tsv
-                    ' "$cache" 2>/dev/null)
-                    [ -n "$reset7" ] && epoch7=$(iso_to_epoch "$reset7")
-                    if [ -n "$pct7" ]; then
-                        # the cache outlives an expired token: a window that
-                        # already reset is back to 0%
-                        if [ -n "$epoch7" ] && [ "$epoch7" -lt "$CURRENT_TIME" ]; then
-                            pct7="0%"; epoch7=""
-                        fi
-                        usage="$(bar_pct "${pct7%\%}") wk"
-                        [ -n "$epoch7" ] && reset=$(format_epoch "$epoch7" | sed 's/AM$/am/; s/PM$/pm/')
-                    fi
-                    [ -n "$pct5" ] && items="5h $pct5"
-                    [ -n "$pctm" ] && items="${items:+$items · }month $pctm"
+                if [ "$fpct" = "disabled" ]; then
+                    emit "${model} · 5h" "${DIM}disabled${RESET}" ""
+                elif [ -n "$fpct" ]; then
+                    emit "${model} · 5h" "$(bar_pct "${fpct%\%}")" ""
                 fi
-                emit_row "$cell" 28 "$plan" "$usage" "$reset"
-                emit_detail "$items"
-                ;;
-        esac
+            done < <(awk -F'\t' '
+                $1 != "Quota:" && NF >= 3 {
+                    if (!($1 in fam)) { fam[$1] = 1; order[++n] = $1 }
+                    if ($2 ~ /Weekly/ && w[$1]++ == 0) { wp[$1] = $3; wr[$1] = $4 }
+                    if ($2 ~ /Five Hour/ && f[$1]++ == 0) fp[$1] = $3
+                }
+                END { for (i = 1; i <= n; i++) printf "%s\t%s\t%s\t%s\n", order[i], wp[order[i]], wr[order[i]], fp[order[i]] }
+            ' "$cache")
+            [ "$any" = 0 ] && emit "—" "—" ""
+            ;;
+        codex)
+            read -r pct tag <<< "$(herdr_limit_usage "${HERDR_LIMITS[codex]:-}")" || true
+            if [ -n "$pct" ]; then emit "${tag:--}" "$(bar_pct "${pct%\%}")" ""
+            else emit "—" "—" ""; fi
+            ;;
+        grok)
+            # Herdr's limit is account-blind; attach it to the first account only.
+            if [ "$id" = "$first_id" ]; then
+                read -r pct tag <<< "$(herdr_limit_usage "${HERDR_LIMITS[grok]:-}")" || true
+                if [ -n "$pct" ]; then emit "${tag:--}" "$(bar_pct "${pct%\%}")" ""
+                else emit "—" "—" ""; fi
+            else
+                emit "—" "—" ""
+            fi
+            ;;
+        opencode)
+            emit "—" "—" ""
+            ;;
+        kimi)
+            cache=$(quota_cache_path kimi "$id" json)
+            local pct7="" reset7="" pct5="" pctm="" epoch7="" reset_fmt="—"
+            if [ -f "$cache" ]; then
+                IFS=$'\t' read -r pct7 reset7 pct5 pctm < <(jq -r '
+                    def pct($k): (.usages[$k].used_ratio // null) as $r |
+                        if $r == null then "" else "\(($r * 100) | round)%" end;
+                    def rst($k): (.usages[$k].reset_time // "");
+                    [pct("limit_7d"), rst("limit_7d"), pct("limit_5h"), pct("limit_month_total")] | @tsv
+                ' "$cache" 2>/dev/null) || true
+                [ -n "$reset7" ] && epoch7=$(iso_to_epoch "$reset7" || true)
+                if [ -n "$pct7" ]; then
+                    # the cache outlives an expired token: a window that already reset is back to 0%
+                    if [ -n "$epoch7" ] && [ "$epoch7" -lt "$CURRENT_TIME" ]; then
+                        pct7="0%"; epoch7=""
+                    fi
+                    [ -n "$epoch7" ] && reset_fmt=$(format_epoch "$epoch7" | sed 's/AM$/am/; s/PM$/pm/')
+                    emit "7d" "$(bar_pct "${pct7%\%}")" "$reset_fmt"
+                fi
+                [ -n "$pct5" ] && emit "5h" "$(bar_pct "${pct5%\%}")" ""
+                [ -n "$pctm" ] && emit "month" "$(bar_pct "${pctm%\%}")" ""
+            fi
+            [ "$any" = 0 ] && emit "—" "—" ""
+            ;;
+    esac
+}
+
+render_group() { # <agent> <ids> — TSV rows, __RULE__ between accounts
+    local agent=$1 ids=$2 multi=0 count=0 first=1 id first_id
+    count=$(grep -c '' <<< "$ids")
+    [ "$count" -gt 1 ] && multi=1
+    first_id=$(head -n 1 <<< "$ids")
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        [ "$first" = 0 ] && echo __RULE__
+        first=0
+        emit_account "$agent" "$id" "$multi" "$first_id"
     done <<< "$ids"
 }
 
-prev_seen=0 prev_multi=0
+limit_tsv=$'AGENT\tACCOUNT\tPLAN\tLIMIT\tUSAGE\tRESETS\n'
+sep=0
 for agent in "${GROUP_ORDER[@]}"; do
     ids=$(awk -F'\t' -v a="$agent" '$1 == a { print $2 }' <<< "$ACC_TSV")
     [ -n "$ids" ] || continue
-    out=$(render_group "$agent" "$ids")
-    [ -n "$out" ] || continue
-    multi=0; [ "$(grep -c '' <<< "$out")" -gt 1 ] && multi=1
-    # separate blocks when either neighbor renders more than one line;
-    # adjacent single-line rows (codex · …, opencode · …) stack compactly
-    [ "$prev_seen" = 1 ] && { [ "$multi" = 1 ] || [ "$prev_multi" = 1 ]; } && echo ""
-    printf '%s\n' "$out" | format_bars
-    prev_seen=1; prev_multi=$multi
+    block=$(render_group "$agent" "$ids")
+    [ -n "$block" ] || continue
+    [ "$sep" = 1 ] && limit_tsv+=$'__RULE__\n'
+    limit_tsv+="$block"$'\n'
+    sep=1
 done
 
-echo ""
-echo -e "${SUBMARGIN}${CYAN}[Other Agents (Installed & Active)]${RESET}"
-printf "${DIM}${SUBSUBMARGIN}%-10s | %-16s | %s${RESET}\n" "AGENT" "PROVIDER" "LIMIT / CAPACITY"
-echo -e "${DIM}${SUBSUBMARGIN}──────────────────────────────────────────────────────────────────────${RESET}"
+if [ "$sep" = 1 ]; then
+    echo ""
+    echo -e "${MARGIN}${YELLOW}■ SUBSCRIPTION LIMITS ${RESET}"
+    # protect the account column (1): model names ellipsize before emails do
+    print_indented "$SUBMARGIN" <<< "$(table_render "$BUDGET" 3 0 1 <<< "$limit_tsv")"
+fi
 
+other_tsv=$'AGENT\tPROVIDER\tLIMIT\n'
+other_any=0
 for agent in "${ALL_AGENTS[@]}"; do
-    # Agents with registry accounts render as groups above
     [ -n "${AGENT_HAS[$agent]:-}" ] && continue
-    
     is_installed=0
     if [ -n "${KNOWN_AGENTS[$agent]:-}" ] && [ -d "${KNOWN_AGENTS[$agent]}" ]; then
         is_installed=1
     fi
-    
     has_limit=0
-    if [ -n "${HERDR_LIMITS[$agent]:-}" ]; then
-        has_limit=1
-    fi
-    
+    [ -n "${HERDR_LIMITS[$agent]:-}" ] && has_limit=1
     if [ "$has_limit" -eq 0 ] && [ "$is_installed" -eq 0 ]; then
         continue
     fi
-    
     provider="${HERDR_PROVIDERS[$agent]:-(Installed)}"
     limit="${HERDR_LIMITS[$agent]:-Idle / Offline}"
-    
-    # If it's just 'Installed', use DIM coloring for the provider/limit so it doesn't clutter active limits
+    limit=${limit//$'\t'/ }
     if [ "$has_limit" -eq 0 ]; then
-        printf "${SUBSUBMARGIN}${BOLD}${WHITE}%-10s${RESET} | ${DIM}%-16s${RESET} | ${DIM}%s${RESET}\n" "$agent" "$provider" "$limit" | format_bars
+        provider="${DIM}${provider}${RESET}"
+        limit="${DIM}${limit}${RESET}"
     else
-        printf "${SUBSUBMARGIN}${BOLD}${WHITE}%-10s${RESET} | ${CYAN}%-16s${RESET} | ${GREEN}%s${RESET}\n" "$agent" "$provider" "$limit" | format_bars
+        provider="${CYAN}${provider}${RESET}"
+        limit="${GREEN}${limit}${RESET}"
     fi
+    other_tsv+="${BOLD}${WHITE}${agent}${RESET}"$'\t'"${provider}"$'\t'"${limit}"$'\n'
+    other_any=1
 done
+
+if [ "$other_any" = 1 ]; then
+    echo ""
+    echo -e "${MARGIN}${CYAN}■ OTHER AGENTS ${RESET}"
+    print_indented "$SUBMARGIN" <<< "$(table_render "$BUDGET" 2 0 <<< "$other_tsv")"
+fi
 
 echo -e "\n${MARGIN}${DIM}Press any key to exit...${RESET}"
 read -n 1 -s
