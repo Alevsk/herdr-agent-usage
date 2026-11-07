@@ -47,6 +47,15 @@ fit_pad() { # <string> <width> — truncate (dropping color if needed), then pad
     pad_cols "$s" "$w"
 }
 
+# Headroom to consumption. 100 remaining is nothing spent; 0 remaining is
+# the window full. Non-numeric input becomes 0. A trailing % is ignored.
+remaining_to_used() { # <remaining 0-100>
+    local pct=${1%\%}
+    [[ $pct =~ ^[0-9]+$ ]] || pct=0
+    [ "$pct" -gt 100 ] && pct=100
+    printf '%s' "$(( 100 - pct ))"
+}
+
 # 10-block bar. Green under 70, yellow from 70 to 89, red at 90 and above.
 bar_pct() { # <pct 0-100>
     local pct=${1%\%} w=10 color filled_bar="" empty_bar="" i

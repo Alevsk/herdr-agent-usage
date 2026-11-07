@@ -38,12 +38,15 @@ print_indented() { # <indent> — prefix each stdin line
     done
 }
 
-# Herdr reports limits as "7d 18%"; rows want "18% 7d". Empty when the value
-# does not match that shape (e.g. codex_local_limit's chained summary).
-herdr_limit_usage() { # <limit>
+# Herdr reports limits as "7d 18%"; rows want the window tag separately.
+# The percentage is headroom (what the usage bar publishes as % left), not
+# consumption. Empty when the value does not match that shape (e.g.
+# codex_local_limit's chained summary).
+herdr_limit_usage() { # <limit> → "<used-pct> <window>"
     local window pct
     read -r window pct <<< "$1"
-    [[ "$window" =~ ^[0-9]+[smhd]$ && "$pct" =~ ^[0-9]+%$ ]] && echo "$pct $window"
+    [[ "$window" =~ ^[0-9]+[smhd]$ && "$pct" =~ ^[0-9]+%$ ]] || return 0
+    echo "$(remaining_to_used "$pct") $window"
 }
 
 JSON_DATA=$("$HERDR" agent list 2>/dev/null)
@@ -406,13 +409,14 @@ emit_account() { # <agent> <id> <multi 0|1> <first_id>
                         epoch=$(iso_to_epoch "$wreset" || true)
                         reset_fmt="—"
                         [ -n "$epoch" ] && reset_fmt=$(format_epoch "$epoch" | sed 's/AM$/am/; s/PM$/pm/')
-                        emit "${model} · week" "$(bar_pct "${wpct%\%}")" "$reset_fmt"
+                        # agy /usage reports what is left; the bar is what is spent
+                        emit "${model} · week" "$(bar_pct "$(remaining_to_used "$wpct")")" "$reset_fmt"
                     fi
                 fi
                 if [ "$fpct" = "disabled" ]; then
                     emit "${model} · 5h" "${DIM}disabled${RESET}" ""
                 elif [ -n "$fpct" ]; then
-                    emit "${model} · 5h" "$(bar_pct "${fpct%\%}")" ""
+                    emit "${model} · 5h" "$(bar_pct "$(remaining_to_used "$fpct")")" ""
                 fi
             done < <(awk -F'\t' '
                 $1 != "Quota:" && NF >= 3 {

@@ -65,6 +65,15 @@ ok "bar widths match" "15" "${#vis}"
 vis=$(strip "$(bar_pct 100)")
 ok "bar 100 width" "15" "${#vis}"
 
+# Sources that report headroom (100 = nothing spent) must become consumption
+# before the bar, or a full allowance paints red.
+ok "remaining 100 is unused" "0" "$(remaining_to_used 100)"
+ok "remaining 0 is spent" "100" "$(remaining_to_used 0)"
+ok "remaining 91 is 9 used" "9" "$(remaining_to_used '91%')"
+ok "remaining 9 stays high" "91" "$(remaining_to_used 9)"
+vis=$(strip "$(bar_pct "$(remaining_to_used 100)")")
+ok "full allowance is an empty green bar" "░░░░░░░░░░   0%" "$vis"
+ok "full allowance is not red" "0" "$(has_code "$(bar_pct "$(remaining_to_used 100)")" $'\033[1;31m')"
 # ── account label: email from the registry, default prefix only when shared
 ok "account default multi" "default · alevsk.8772@gmail.com" \
     "$(account_display default alevsk.8772@gmail.com 1)"
