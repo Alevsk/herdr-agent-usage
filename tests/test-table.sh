@@ -34,6 +34,8 @@ source lib/table.sh
 # ── bars: 10 blocks, severity color, stable visible width ──────────────
 vis=$(strip "$(bar_pct 0)")
 ok "bar 0 visible" "░░░░░░░░░░   0%" "$vis"
+vis=$(strip "$(bar_pct 6)")
+ok "bar 6 still shows consumption" "█░░░░░░░░░   6%" "$vis"
 ok "bar 0 green" "1" "$(has_code "$(bar_pct 0)" $'\033[1;32m')"
 ok "bar 0 not red" "0" "$(has_code "$(bar_pct 0)" $'\033[1;31m')"
 

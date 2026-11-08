@@ -62,6 +62,8 @@ bar_pct() { # <pct 0-100>
     [[ $pct =~ ^[0-9]+$ ]] || pct=0
     [ "$pct" -gt 100 ] && pct=100
     local filled=$(( pct * w / 100 ))
+    # 1–9% truncates to an empty meter, so any real consumption keeps one block.
+    [ "$pct" -gt 0 ] && [ "$filled" -eq 0 ] && filled=1
     if [ "$pct" -ge 90 ]; then color=$RED
     elif [ "$pct" -ge 70 ]; then color=$YELLOW
     else color=$GREEN
