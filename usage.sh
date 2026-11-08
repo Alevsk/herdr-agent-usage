@@ -16,6 +16,14 @@ source "$PLUGIN_DIR/lib/table.sh"
 source "$PLUGIN_DIR/lib/accounts.sh"
 # shellcheck source=lib/quota.sh
 source "$PLUGIN_DIR/lib/quota.sh"
+# shellcheck source=lib/provider.sh
+source "$PLUGIN_DIR/lib/provider.sh"
+for _provider in "$PLUGIN_DIR"/lib/providers/*.sh; do
+    [ -f "$_provider" ] || continue
+    # shellcheck source=/dev/null
+    source "$_provider"
+done
+unset _provider
 
 # Outer width of the grids: the pane, minus the indent, capped so a wide
 # terminal does not stretch every column.
@@ -122,6 +130,11 @@ codex_live_context() {
     fi
 }
 
+# Existing readers, registered on the provider contract so the pane loop
+# below is one call. A new agent adds provider_<id>_live_context instead.
+provider_claude_live_context() { claude_live_context "$1"; }
+provider_codex_live_context() { codex_live_context "$2"; }
+
 # Prints the newest file among the NUL-separated paths read from stdin.
 newest_file() {
     local newest="" file
@@ -148,15 +161,14 @@ while IFS=$'\t' read -r agent status context title session cwd; do
     # The braces in "${agent}·…" are load-bearing: bash 3.2–5.3 in a UTF-8
     # locale otherwise scans $agent· as one (empty) variable name and drops the prefix.
     live=""
+    live=$(provider_live_context "$agent" "$session" "$cwd" || true)
     case "$agent" in
         claude)
-            live=$(claude_live_context "$session")
             id=$(accounts_resolve claude "$session")
             [ -n "$id" ] && [ "${ACC_LABEL[claude/$id]:-}" != default ] && [ -n "${ACC_LABEL[claude/$id]:-}" ] &&
                 agent="${agent}·${ACC_LABEL[claude/$id]}"
             ;;
         codex)
-            live=$(codex_live_context "$cwd")
             id=$(accounts_resolve codex "$cwd")
             [ -n "$id" ] && [ "${ACC_LABEL[codex/$id]:-}" != default ] && [ -n "${ACC_LABEL[codex/$id]:-}" ] &&
                 agent="${agent}·${ACC_LABEL[codex/$id]}"
@@ -173,7 +185,7 @@ done < <(jq -r '(.result.agents // [])[] | [.agent, .agent_status, (.tokens.cont
 
 context_table=$(table_render "$BUDGET" 2 1 <<< "$context_tsv")
 print_indented "$SUBMARGIN" <<< "$context_table"
-note='Live for Claude and Codex. A percentage appears once hooks/claude-statusline.sh has run.
+note='Live for Claude, Codex, and OpenCode. Claude shows a percentage once hooks/claude-statusline.sh has run.
 "—" means no data. A bare claude/codex row is the default account; a ·label suffix names the account.'
 echo ""
 while IFS= read -r line; do
@@ -311,6 +323,12 @@ while IFS=$'\t' read -r a id label email plan home; do
             ;;
         agy)  [ -f "$(quota_cache_path agy "$id")" ] || QUOTA_INIT+=("agy|$id|txt|$home") ;;
         kimi) [ -f "$(quota_cache_path kimi "$id" json)" ] || QUOTA_INIT+=("kimi|$id|json|$home") ;;
+        *)
+            if declare -F provider_has_quota >/dev/null && provider_has_quota "$a"; then
+                ext=$(provider_quota_ext "$a")
+                [ -f "$(quota_cache_path "$a" "$id" "$ext")" ] || QUOTA_INIT+=("$a|$id|$ext|$home")
+            fi
+            ;;
     esac
 done <<< "$ACC_TSV"
 
@@ -330,6 +348,13 @@ while IFS=$'\t' read -r a id label email plan home; do
         claude) quota_is_fresh "$(quota_cache_path claude "$id")" || quota_refresh_async claude "$id" txt "$home" ;;
         agy)    quota_is_fresh "$(quota_cache_path agy "$id")"    || quota_refresh_async agy    "$id" txt "$home" ;;
         kimi)   quota_is_fresh "$(quota_cache_path kimi "$id" json)" || quota_refresh_async kimi "$id" json "$home" ;;
+        *)
+            if declare -F provider_has_quota >/dev/null && provider_has_quota "$a"; then
+                ext=$(provider_quota_ext "$a")
+                quota_is_fresh "$(quota_cache_path "$a" "$id" "$ext")" ||
+                    quota_refresh_async "$a" "$id" "$ext" "$home"
+            fi
+            ;;
     esac
 done <<< "$ACC_TSV"
 
@@ -347,6 +372,28 @@ claude_local_summary() { # <cache-file> <home>
     else
         quota_claude_local_usage "$2"
     fi
+}
+
+# Percent bars from a provider adapter's quota_rows. `emit` and `any` belong to
+# emit_account; bash dynamic scope is what makes the nested `emit` work.
+emit_adapter_limits() { # <agent> <id>
+    local agent=$1 id=$2 cache label pct reset_epoch reset_fmt
+    if ! declare -F provider_has_quota >/dev/null || ! provider_has_quota "$agent"; then
+        emit "—" "—" ""
+        return
+    fi
+    cache=$(quota_cache_path "$agent" "$id" "$(provider_quota_ext "$agent")")
+    if [ -f "$cache" ]; then
+        while IFS=$'\t' read -r label pct reset_epoch; do
+            [ -n "$label" ] || continue
+            reset_fmt=""
+            if [[ $reset_epoch =~ ^[0-9]+$ ]]; then
+                reset_fmt=$(format_epoch "$reset_epoch" | sed 's/AM$/am/; s/PM$/pm/')
+            fi
+            emit "$label" "$(bar_pct "$pct")" "$reset_fmt"
+        done < <(provider_quota_rows "$agent" "$cache" || true)
+    fi
+    [ "$any" = 0 ] && emit "—" "—" ""
 }
 
 # One account block. The first window row carries agent, account, and plan;
@@ -443,9 +490,6 @@ emit_account() { # <agent> <id> <multi 0|1> <first_id>
                 emit "—" "—" ""
             fi
             ;;
-        opencode)
-            emit "—" "—" ""
-            ;;
         kimi)
             cache=$(quota_cache_path kimi "$id" json)
             local pct7="" reset7="" pct5="" pctm="" epoch7="" reset_fmt="—"
@@ -469,6 +513,9 @@ emit_account() { # <agent> <id> <multi 0|1> <first_id>
                 [ -n "$pctm" ] && emit "month" "$(bar_pct "${pctm%\%}")" ""
             fi
             [ "$any" = 0 ] && emit "—" "—" ""
+            ;;
+        *)
+            emit_adapter_limits "$agent" "$id"
             ;;
     esac
 }

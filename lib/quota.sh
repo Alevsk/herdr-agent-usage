@@ -88,7 +88,15 @@ quota_dispatch() { # <agent> <account_id> <ext> <home>
         claude) quota_store claude "$id" "$ext" quota_fetch_claude "$home" ;;
         agy)    quota_store agy    "$id" "$ext" quota_fetch_agy ;;
         kimi)   quota_store kimi   "$id" "$ext" quota_fetch_kimi ;;
-        *)      return 1 ;;
+        *)
+            # Adapters (lib/provider.sh) join the same cache. Absent dispatcher
+            # — quota.sh sourced alone — is just "no adapter".
+            if declare -F provider_has_quota >/dev/null && provider_has_quota "$agent"; then
+                quota_store "$agent" "$id" "$ext" provider_quota_fetch "$agent" "$id" "$home"
+            else
+                return 1
+            fi
+            ;;
     esac
 }
 
